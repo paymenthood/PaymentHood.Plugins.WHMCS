@@ -156,28 +156,12 @@ class PaymentHoodHandler
                 $clientEmail = $params['clientdetails']['email'] ?? '';
 
                 $callbackUrl = rtrim(self::getSystemUrl(), '/') . '/modules/gateways/callback/paymenthood.php?invoiceid=' . $invoiceId;
-
-                // Detect subscription items for checkout UI (only for invoice payments)
-                $hasSubscription = false;
-                if ($isInvoicePayment) {
-                    $hasSubscription = Capsule::table('tblinvoiceitems as ii')
-                        ->leftJoin('tblhosting as h', 'h.id', '=', 'ii.relid')
-                        ->where('ii.invoiceid', $invoiceId)
-                        ->whereIn('ii.type', ['Hosting', 'Product', 'Product/Service'])
-                        ->where(function ($q) {
-                            $q->whereNull('h.billingcycle')
-                                ->orWhereNotIn('h.billingcycle', ['Free', 'Free Account', 'One Time']);
-                        })
-                        ->exists();
-                }
-
                 $postData = [
                     'referenceId' => (string) $invoiceId,
                     'amount' => $amount,
                     'currency' => $currency,
                     'autoCapture' => true,
                     'webhookUrl' => $callbackUrl,
-                    'showAvailablePaymentMethodsInCheckout' => $hasSubscription,
                     'customerOrder' => [
                         'customer' => [
                             'customerId' => (string) $clientId,
