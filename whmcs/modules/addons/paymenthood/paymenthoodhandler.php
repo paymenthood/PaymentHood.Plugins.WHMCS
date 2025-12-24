@@ -547,6 +547,7 @@ HTML;
                 ->join('tblinvoiceitems as ii', 'ii.invoiceid', '=', 'i.id')
                 ->join('tblhosting as h', 'ii.relid', '=', 'h.id')
                 ->where('i.status', 'Unpaid')
+                ->where('i.paymentmethod', PAYMENTHOOD_GATEWAY)
                 ->where('ii.type', 'Hosting')
                 ->whereNotIn('h.billingcycle', ['One Time', 'Free'])
                 ->whereColumn('i.duedate', '=', 'h.nextduedate') // only auto-generated invoice
