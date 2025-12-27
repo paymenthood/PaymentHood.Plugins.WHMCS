@@ -73,26 +73,84 @@ class PaymentHoodHandler
                     ->value('id');
 
                 if (!$orderId) {
-                    // Generate order number using WHMCS function
-                    $orderNumber = Capsule::table('tblorders')->max('ordernum') + 1;
-                    
-                    // Create a minimal order linked to invoice using direct DB insert
-                    $orderId = Capsule::table('tblorders')->insertGetId([
-                        'userid' => $clientId,
-                        'ordernum' => $orderNumber,
-                        'paymentmethod' => self::PAYMENTHOOD_GATEWAY,
-                        'status' => 'Pending',
-                        'amount' => $params['amount'] ?? 0,
-                        'invoiceid' => $invoiceId,
-                        'date' => date('Y-m-d H:i:s'),
-                        'notes' => 'Linked to existing invoice #' . $invoiceId,
+                    // Check if there's an orphan order (order with no invoice) for this user
+                    // This can happen when WHMCS creates an order during checkout before invoice assignment
+                    // Try multiple search strategies to find the orphan order
+
+                    // Strategy 1: Match by payment method and status
+                    $orphanOrder = Capsule::table('tblorders')
+                        ->where('userid', $clientId)
+                        ->where('paymentmethod', self::PAYMENTHOOD_GATEWAY)
+                        ->whereIn('status', ['Pending', 'Active'])
+                        ->where(function ($query) use ($invoiceId) {
+                            $query->whereNull('invoiceid')
+                                ->orWhere('invoiceid', 0);
+                        })
+                        ->orderBy('id', 'desc')
+                        ->first();
+
+                    // Strategy 2: If not found, look for recent order without payment method set
+                    if (!$orphanOrder) {
+                        $orphanOrder = Capsule::table('tblorders')
+                            ->where('userid', $clientId)
+                            ->whereIn('status', ['Pending', 'Active'])
+                            ->where(function ($query) use ($invoiceId) {
+                                $query->whereNull('invoiceid')
+                                    ->orWhere('invoiceid', 0);
+                            })
+                            ->where('date', '>=', date('Y-m-d H:i:s', strtotime('-10 minutes')))
+                            ->orderBy('id', 'desc')
+                            ->first();
+                    }
+
+                    self::safeLogModuleCall('handler_invoice_order_search', [
+                        'invoiceId' => $invoiceId,
+                        'clientId' => $clientId
+                    ], [
+                        'orphanOrderFound' => $orphanOrder ? true : false,
+                        'orphanOrderId' => $orphanOrder ? $orphanOrder->id : null,
+                        'orphanOrderPaymentMethod' => $orphanOrder ? $orphanOrder->paymentmethod : null
                     ]);
 
-                    self::safeLogModuleCall('handler_invoice_order_created', [
-                        'invoiceId' => $invoiceId,
-                        'orderId' => $orderId,
-                        'orderNumber' => $orderNumber
-                    ], []);
+                    if ($orphanOrder) {
+                        // Link the existing orphan order to this invoice
+                        Capsule::table('tblorders')
+                            ->where('id', $orphanOrder->id)
+                            ->update([
+                                'invoiceid' => $invoiceId,
+                                'paymentmethod' => self::PAYMENTHOOD_GATEWAY, // Ensure payment method is set
+                                'notes' => ($orphanOrder->notes ? $orphanOrder->notes . "\n" : '') . 'Linked to invoice #' . $invoiceId
+                            ]);
+
+                        $orderId = $orphanOrder->id;
+
+                        self::safeLogModuleCall('handler_invoice_order_linked', [
+                            'invoiceId' => $invoiceId,
+                            'orderId' => $orderId,
+                            'orphanOrderId' => $orphanOrder->id
+                        ], []);
+                    } else {
+                        // Generate order number using WHMCS function
+                        $orderNumber = Capsule::table('tblorders')->max('ordernum') + 1;
+
+                        // Create a minimal order linked to invoice using direct DB insert
+                        $orderId = Capsule::table('tblorders')->insertGetId([
+                            'userid' => $clientId,
+                            'ordernum' => $orderNumber,
+                            'paymentmethod' => self::PAYMENTHOOD_GATEWAY,
+                            'status' => 'Pending',
+                            'amount' => $params['amount'] ?? 0,
+                            'invoiceid' => $invoiceId,
+                            'date' => date('Y-m-d H:i:s'),
+                            'notes' => 'Linked to existing invoice #' . $invoiceId,
+                        ]);
+
+                        self::safeLogModuleCall('handler_invoice_order_created', [
+                            'invoiceId' => $invoiceId,
+                            'orderId' => $orderId,
+                            'orderNumber' => $orderNumber
+                        ], []);
+                    }
                 }
             }
 
@@ -131,7 +189,7 @@ class PaymentHoodHandler
                     $invoiceAge = time() - strtotime($invoiceDate);
                 }
             }
-            
+
             // Decide if we should redirect to PaymentHood
             // Redirect when:
             // 1. User explicitly submitted payment form (POST with paymentmethod)
@@ -140,7 +198,7 @@ class PaymentHoodHandler
                 ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['paymentmethod'] ?? '') === self::PAYMENTHOOD_GATEWAY) ||
                 ($isInvoicePayment && $invoiceAge > 0 && $invoiceAge < 60)
             );
-            
+
             self::safeLogModuleCall('handler_redirect_decision', [
                 'invoiceId' => $invoiceId,
                 'invoiceAge' => $invoiceAge,
@@ -207,207 +265,6 @@ class PaymentHoodHandler
                 'error' => $ex->getMessage(),
                 'trace' => $ex->getTraceAsString()
             ]);
-            return '<div class="alert alert-danger">paymentHood Error: ' . htmlspecialchars($ex->getMessage()) . '</div>';
-        }
-    }
-
-    public static function handleInvoice2(array $params)
-    {
-        try {
-            // Use the existing invoice context; do NOT create orders here.
-            $clientId = (int) ($params['clientdetails']['userid'] ?? 0);
-            $invoiceId = (int) ($params['invoiceid'] ?? 0);
-
-            if ($invoiceId <= 0) {
-                return '<div class="alert alert-danger">Invalid invoice context.</div>';
-            }
-
-            $credentials = self::getGatewayCredentials();
-            $appId = $credentials['appId'];
-            $token = $credentials['token'];
-
-            // Ensure the order exists
-            $orderId = Capsule::table('tblorders')
-                ->where('invoiceid', $invoiceId)
-                ->value('id');
-
-            // Check if this is a fresh order (created in last 30 seconds) to force immediate redirect
-            $orderIsRecent = false;
-            if ($orderId) {
-                $orderCreatedAt = Capsule::table('tblorders')
-                    ->where('id', $orderId)
-                    ->value('date');
-                if ($orderCreatedAt) {
-                    $orderAge = time() - strtotime($orderCreatedAt);
-                    $orderIsRecent = ($orderAge < 30); // Consider orders created in last 30 seconds as "just created"
-                    self::safeLogModuleCall('handleInvoice - order age check', [
-                        'orderId' => $orderId,
-                        'orderCreatedAt' => $orderCreatedAt,
-                        'orderAge' => $orderAge,
-                        'orderIsRecent' => $orderIsRecent
-                    ]);
-                }
-            }
-
-            $orderJustCreated = false;
-            if (!$orderId) {
-                self::safeLogModuleCall('handleInvoice - create order manually', ['appId' => $appId, 'invoiceId' => $invoiceId]);
-                // Try to get the order via WHMCS helper function
-                // Or create a manual order
-                // Prefer WHMCS Admin API to create orders so hooks and defaults run
-                try {
-                    $apiParams = [
-                        'clientid' => (int) $clientId,
-                        'paymentmethod' => self::PAYMENTHOOD_GATEWAY,
-                        'status' => 'Pending',
-                        'sendemail' => false,
-                        'notes' => 'Created by PaymentHood link handler',
-                    ];
-                    $apiResult = localAPI('AddOrder', $apiParams);
-                    self::safeLogModuleCall('AddOrder-attempt', $apiParams, $apiResult);
-                    if (isset($apiResult['result']) && $apiResult['result'] === 'success') {
-                        $orderId = (int) ($apiResult['orderid'] ?? 0);
-                    } else {
-                        // Fallback to direct DB insert if API fails
-                        $orderNumber = Capsule::table('tblorders')->max('ordernum') + 1;
-                        $orderId = Capsule::table('tblorders')->insertGetId([
-                            'userid' => $clientId,
-                            'ordernum' => $orderNumber,
-                            'paymentmethod' => self::PAYMENTHOOD_GATEWAY,
-                            'status' => 'Pending',
-                            'date' => date('Y-m-d H:i:s'),
-                            'notes' => 'Created by PaymentHood link handler',
-                        ]);
-                        self::safeLogModuleCall('AddOrder-fallback-db', ['clientId' => $clientId], ['orderId' => $orderId, 'orderNumber' => $orderNumber]);
-                    }
-                } catch (\Throwable $apiEx) {
-                    // Fallback to direct DB insert if localAPI not available in this context
-                    self::safeLogModuleCall('AddOrder-exception-fallback-db', ['clientId' => $clientId], ['error' => $apiEx->getMessage()]);
-                    $orderNumber = Capsule::table('tblorders')->max('ordernum') + 1;
-                    $orderId = Capsule::table('tblorders')->insertGetId([
-                        'userid' => $clientId,
-                        'ordernum' => $orderNumber,
-                        'paymentmethod' => self::PAYMENTHOOD_GATEWAY,
-                        'status' => 'Pending',
-                        'date' => date('Y-m-d H:i:s'),
-                        'notes' => 'Created by PaymentHood link handler',
-                    ]);
-                }
-
-                // Optionally, link the invoice to the order if already generated
-                if ($invoiceId) {
-                    // Prefer WHMCS Admin API to update order linkage; fallback to DB if not supported
-                    try {
-                        $apiParams = [
-                            'orderid' => (int) $orderId,
-                            // Some WHMCS versions may not support setting invoiceid via UpdateOrder
-                            // Include common fields to avoid partial updates being rejected
-                            'status' => 'Pending',
-                            'paymentmethod' => self::PAYMENTHOOD_GATEWAY,
-                            'notes' => 'Linked to Invoice #' . (int) $invoiceId,
-                        ];
-                        $apiResult = localAPI('UpdateOrder', $apiParams);
-                        self::safeLogModuleCall('UpdateOrder-link-invoice-attempt', $apiParams, $apiResult);
-
-                        // If API doesn't support setting invoice link directly, perform safe fallback
-                        if (!isset($apiResult['result']) || $apiResult['result'] !== 'success') {
-                            Capsule::table('tblorders')
-                                ->where('id', $orderId)
-                                ->update(['invoiceid' => $invoiceId]);
-                            self::safeLogModuleCall('Fallback-DB-UpdateOrder-InvoiceLink', ['orderId' => $orderId, 'invoiceId' => $invoiceId]);
-                        }
-                    } catch (\Throwable $apiEx) {
-                        // Fallback to direct DB update if localAPI fails in this context
-                        Capsule::table('tblorders')
-                            ->where('id', $orderId)
-                            ->update(['invoiceid' => $invoiceId]);
-                        self::safeLogModuleCall('Fallback-Exception-DB-UpdateOrder-InvoiceLink', ['orderId' => $orderId, 'invoiceId' => $invoiceId], ['error' => $apiEx->getMessage()]);
-                    }
-                }
-
-                $orderJustCreated = true;
-                self::safeLogModuleCall('handleInvoice - order created, will redirect immediately', [
-                    'orderId' => $orderId,
-                    'invoiceId' => $invoiceId,
-                    'REQUEST_METHOD' => $_SERVER['REQUEST_METHOD']
-                ]);
-            }
-
-            // Proceed to PaymentHood when:
-            // 1. Form posts with our gateway (manual selection)
-            // 2. Order was just created in this request (to avoid WHMCS order flow interference)
-            // 3. Order exists and was created very recently (within 30 seconds - coming from order completion page)
-            $shouldRedirectToPaymentHood = (
-                ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['paymentmethod'] ?? '') === self::PAYMENTHOOD_GATEWAY)
-                || $orderJustCreated
-                || $orderIsRecent
-            );
-
-            if ($shouldRedirectToPaymentHood) {
-                self::safeLogModuleCall('call payment api - start', [
-                    'appId' => $appId,
-                    'invoiceId' => $invoiceId,
-                    'orderJustCreated' => $orderJustCreated,
-                    'REQUEST_METHOD' => $_SERVER['REQUEST_METHOD'],
-                    'POST_data' => $_POST
-                ]);
-
-                $amount = $params['amount'];
-                $currency = $params['currency'];
-                $clientEmail = $params['clientdetails']['email'] ?? '';
-
-                // Always return/callback to the invoice page context
-                $callbackUrl = rtrim((string) self::getSystemUrl(), '/') . '/modules/gateways/callback/paymenthood.php?invoiceid=' . $invoiceId;
-
-                // Detect subscription-style items to influence checkout UI only
-                $hasSubscription = Capsule::table('tblinvoiceitems as ii')
-                    ->leftJoin('tblhosting as h', 'h.id', '=', 'ii.relid')
-                    ->where('ii.invoiceid', $invoiceId)
-                    ->whereIn('ii.type', ['Hosting', 'Product', 'Product/Service'])
-                    ->where(function ($q) {
-                        $q->whereNull('h.billingcycle')
-                            ->orWhereNotIn('h.billingcycle', ['Free', 'Free Account', 'One Time']);
-                    })
-                    ->exists();
-
-                $postData = [
-                    'referenceId' => (string) $invoiceId,
-                    'amount' => $amount,
-                    'currency' => $currency,
-                    'autoCapture' => true,
-                    'webhookUrl' => $callbackUrl,
-                    'showAvailablePaymentMethodsInCheckout' => $hasSubscription,
-                    'customerOrder' => [
-                        'customer' => [
-                            'customerId' => (string) $clientId,
-                            'email' => $clientEmail,
-                        ],
-                    ],
-                    'returnUrl' => $callbackUrl,
-                ];
-
-                $response = self::callApi(self::paymenthood_getPaymentBaseUrl() . "/apps/{$appId}/payments/hosted-page", $postData, $token);
-                self::safeLogModuleCall('result of create payment', ['invoiceId' => $invoiceId], $response);
-
-                if (isset($response['Message']) && strpos($response['Message'], 'ProviderReferenceId already used') !== false) {
-                    self::safeLogModuleCall('Duplicate Payment', $response);
-                    // Let the callback resolve final status; do not cancel invoice here.
-                    return '<p>Duplicate payment reference detected. Please refresh the invoice page; if the invoice is already paid, no action is required.</p>';
-                }
-
-                if (empty($response['redirectUrl'])) {
-                    return '<p>Payment gateway returned invalid response.</p>';
-                }
-
-                self::safeLogModuleCall('redirect to hosted payment', ['url' => $response['redirectUrl'], 'invoiceId' => $invoiceId]);
-                header('Location: ' . $response['redirectUrl']);
-                exit;
-            }
-
-            // Initial render: show our Pay button UI
-            return self::renderInvoiceUI((string) $invoiceId, $appId, $token);
-        } catch (\Throwable $ex) {
-            self::safeLogModuleCall('handler_exception', $params, ['error' => $ex->getMessage()], $ex->getTraceAsString());
             return '<div class="alert alert-danger">paymentHood Error: ' . htmlspecialchars($ex->getMessage()) . '</div>';
         }
     }
@@ -542,16 +399,18 @@ HTML;
     {
         self::safeLogModuleCall('handler_cron_unpaid_invoices_start', [], []);
         try {
-            // Get invoices due today that use paymentHood as gateway
+            // Get RENEWAL invoices ONLY for recurring/subscription products that use paymentHood
+            // Initial purchases are paid manually via hosted payment page
+            // Auto-payment is only for renewals (when duedate = nextduedate)
             $invoices = Capsule::table('tblinvoices as i')
                 ->join('tblinvoiceitems as ii', 'ii.invoiceid', '=', 'i.id')
                 ->join('tblhosting as h', 'ii.relid', '=', 'h.id')
                 ->where('i.status', 'Unpaid')
-                ->where('i.paymentmethod', PAYMENTHOOD_GATEWAY)
+                ->where('i.paymentmethod', self::PAYMENTHOOD_GATEWAY)
                 ->where('ii.type', 'Hosting')
-                ->whereNotIn('h.billingcycle', ['One Time', 'Free'])
-                ->whereColumn('i.duedate', '=', 'h.nextduedate') // only auto-generated invoice
-                ->select('i.id as invoiceId', 'i.userid', 'i.total')
+                ->whereNotIn('h.billingcycle', ['One Time', 'Free', ''])
+                ->whereColumn('i.duedate', '=', 'h.nextduedate') // ONLY renewal invoices
+                ->select('i.id as invoiceId', 'i.userid', 'i.total', 'i.duedate', 'h.billingcycle', 'h.nextduedate')
                 ->distinct()
                 ->get();
 
@@ -561,7 +420,13 @@ HTML;
 
                 self::safeLogModuleCall(
                     'processUnpaidInvoices',
-                    ['invoiceId' => $invoiceId, 'clientId' => $clientId]
+                    [
+                        'invoiceId' => $invoiceId, 
+                        'clientId' => $clientId,
+                        'billingCycle' => $invoice->billingcycle,
+                        'dueDate' => $invoice->duedate,
+                        'nextDueDate' => $invoice->nextduedate
+                    ]
                 );
 
                 try {
@@ -631,11 +496,13 @@ HTML;
             $token = $credentials['token'];
 
             self::safeLogModuleCall('createAutoPayment', ['appId' => $appId]);
+            $callbackUrl = rtrim(self::getSystemUrl(), '/') . '/modules/gateways/callback/paymenthood.php?invoiceid=' . $invoiceId;
 
             $postData = [
                 "referenceId" => $invoiceId,
                 "amount" => $amount,
                 "autoCapture" => true,
+                "webhookUrl" => $callbackUrl,
                 "customerOrder" => [
                     "customer" => [
                         "customerId" => $clientId,
