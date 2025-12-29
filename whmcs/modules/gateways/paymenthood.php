@@ -31,8 +31,8 @@ function paymenthood_config()
         ->where('setting', 'activated')
         ->value('value');
 
-    // Build activation link
-    return [
+    // Build base configuration
+    $config = [
         'FriendlyName' => [
             'Type' => 'System',
             'Value' => 'PaymentHood',
@@ -47,6 +47,17 @@ function paymenthood_config()
             'Description' => paymenthood_getActivationLink($activated),
         ],
     ];
+
+    // Add sandbox mode checkbox only if activated
+    if ($activated == '1') {
+        $config['IsSandboxActivated'] = [
+            'FriendlyName' => 'Use Sandbox Mode',
+            'Type' => 'yesno',
+            'Description' => 'Enable to use sandbox credentials for testing. Disable to use live credentials for production.',
+        ];
+    }
+
+    return $config;
 }
 
 function paymenthood_getActivationLink($activated)
@@ -65,6 +76,7 @@ function paymenthood_getActivationLink($activated)
 
     PaymentHoodHandler::safeLogModuleCall('gateway_activation_link_generated', [
         'appId' => $appId,
+        'returnUrl' => $currentUrl,
         'activated' => $activated
     ], [
         'url' => $paymenthoodUrl
@@ -82,17 +94,17 @@ function paymenthood_getActivationLink($activated)
 
 function paymenthood_handleActivationReturn()
 {
-    if (isset($_GET['appId']) && isset($_GET['authorizationCode'])) {
-        $appId = $_GET['appId'];
+    if (isset($_GET['licenseId']) && isset($_GET['authorizationCode'])) {
+        $licenseId = $_GET['licenseId'];
         $authorizationCode = $_GET['authorizationCode'];
 
         PaymentHoodHandler::safeLogModuleCall('gateway_activation_return', [
-            'appId' => $appId
+            'licenseId' => $licenseId
         ], []);
 
-        // Call paymentHood API to generate bot token
+        // Call PaymentHood API to get app credentials
         $baseUrl = PaymentHoodHandler::paymenthood_getPaymentAppBaseUrl();
-        $url = $baseUrl . "/apps/" . urlencode($appId) . "/generate-bot-token";
+        $url = $baseUrl . "/licenses/" . urlencode($licenseId);
 
         $ch = curl_init($url);
         curl_setopt($ch, CURLOPT_POST, true);
@@ -108,17 +120,65 @@ function paymenthood_handleActivationReturn()
         PaymentHoodHandler::safeLogModuleCall('gateway_activation_generate_token', [
             'url' => $url
         ], [
-            'httpCode' => $httpCode
+            'httpCode' => $httpCode,
+            'responseLength' => strlen($response)
         ]);
 
         if ($httpCode == 200 && !empty($response)) {
-            $accessToken = trim($response);
+            // Parse JSON array response
+            $apps = json_decode($response, true);
+            
+            if (!is_array($apps)) {
+                PaymentHoodHandler::safeLogModuleCall('gateway_activation_invalid_response', [
+                    'url' => $url
+                ], [
+                    'error' => 'Response is not a valid JSON array',
+                    'response' => $response
+                ]);
+                return;
+            }
 
-            // Save appId + accessToken in WHMCS gateway configuration
-            paymenthood_saveCredentials($appId, $accessToken);
+            PaymentHoodHandler::safeLogModuleCall('gateway_activation_apps_received', [
+                'count' => count($apps)
+            ], [
+                'apps' => $apps
+            ]);
 
-            // Sync webhook info with paymenthood provider
-            paymenthood_syncWebhookToken($appId, $accessToken);
+            // Process each app (live and sandbox)
+            foreach ($apps as $app) {
+                $isSandbox = $app['isSandbox'] ?? false;
+                $appId = $app['appId'] ?? '';
+                $appAuthCode = $app['authorizationCode'] ?? '';
+
+                if (empty($appId) || empty($appAuthCode)) {
+                    PaymentHoodHandler::safeLogModuleCall('gateway_activation_missing_fields', [
+                        'isSandbox' => $isSandbox
+                    ], [
+                        'app' => $app
+                    ]);
+                    continue;
+                }
+
+                // Save credentials with sandbox suffix if needed
+                $suffix = $isSandbox ? '_sandbox' : '';
+                paymenthood_saveGatewaySetting(paymenthood_GATEWAY, 'appId' . $suffix, $appId);
+                paymenthood_saveGatewaySetting(paymenthood_GATEWAY, 'token' . $suffix, $appAuthCode);
+                paymenthood_saveGatewaySetting(paymenthood_GATEWAY, 'isSandbox' . $suffix, $isSandbox ? '1' : '0');
+
+                PaymentHoodHandler::safeLogModuleCall('gateway_credentials_saved', [
+                    'appId' => $appId,
+                    'isSandbox' => $isSandbox
+                ], []);
+
+                // Sync webhook for this app
+                paymenthood_syncWebhookToken($appId, $appAuthCode);
+            }
+
+            // Mark gateway as activated
+            paymenthood_saveGatewaySetting(paymenthood_GATEWAY, 'activated', '1');
+            
+            // Set sandbox mode as default
+            paymenthood_saveGatewaySetting(paymenthood_GATEWAY, 'IsSandboxActivated', 'on');
 
             // Redirect to clean URL (remove query parameters)
             $cleanUrl = strtok($_SERVER['REQUEST_URI'], '?');

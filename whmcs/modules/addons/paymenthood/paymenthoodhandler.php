@@ -398,6 +398,21 @@ HTML;
     public static function processUnpaidInvoices()
     {
         self::safeLogModuleCall('handler_cron_unpaid_invoices_start', [], []);
+        
+        // Check if PaymentHood gateway is activated
+        $activated = Capsule::table('tblpaymentgateways')
+            ->where('gateway', self::PAYMENTHOOD_GATEWAY)
+            ->where('setting', 'activated')
+            ->value('value');
+
+        if ($activated != '1') {
+            self::safeLogModuleCall('handler_cron_gateway_not_activated', [], [
+                'activated' => $activated,
+                'message' => 'PaymentHood gateway is not activated, skipping auto-payment processing'
+            ]);
+            return;
+        }
+
         try {
             // Get RENEWAL invoices ONLY for recurring/subscription products that use paymentHood
             // Initial purchases are paid manually via hosted payment page
