@@ -31,11 +31,14 @@ function paymenthood_config()
         ->where('setting', 'activated')
         ->value('value');
 
+    // Keep the gateway name stable in admin + gateway lists.
+    // Sandbox indication is shown only on the checkout page via a client-area hook.
+    $friendlyName = 'PaymentHood';
     // Build base configuration
     $config = [
         'FriendlyName' => [
             'Type' => 'System',
-            'Value' => 'PaymentHood',
+            'Value' => $friendlyName,
         ],
         'Description' => [
             'Type' => 'System',
@@ -46,14 +49,26 @@ function paymenthood_config()
             'Type' => 'system',
             'Description' => paymenthood_getActivationLink($activated),
         ],
-    ];
-
-    // Add sandbox mode checkbox only if activated
-    if ($activated == '1') {
-        $config['IsSandboxActivated'] = [
+        'IsSandboxActivated' => [
             'FriendlyName' => 'Use Sandbox Mode',
             'Type' => 'yesno',
-            'Description' => 'Enable to use sandbox credentials for testing. Disable to use live credentials for production.',
+            'Description' => 'Enable to use sandbox credentials for testing. Disable to use live credentials for production.'
+                . ($activated == '1' ? '' : ' (Activate PaymentHood to apply this setting.)'),
+        ],
+    ];
+
+    // Add extra links only if activated
+    if ($activated == '1') {
+        $config['manageSandboxGateways'] = [
+            'FriendlyName' => 'Manage Sandbox Gateways',
+            'Type' => 'system',
+            'Description' => paymenthood_getManageSandboxGatewaysLink(),
+        ];
+
+        $config['manageLiveGateways'] = [
+            'FriendlyName' => 'Manage Live Gateways',
+            'Type' => 'system',
+            'Description' => paymenthood_getManageLiveGatewaysLink(),
         ];
     }
 
@@ -92,6 +107,28 @@ function paymenthood_getActivationLink($activated)
             </a>';
 }
 
+function paymenthood_getManageSandboxGatewaysLink()
+{
+    $sandboxAppId = PaymentHoodHandler::getGatewaySandboxAppId();
+    $manageUrl = PaymentHoodHandler::paymenthood_ConsoleUrl() . '/' . urlencode($sandboxAppId) . '/gateways';
+    return '<a href="' . htmlspecialchars($manageUrl) . '" 
+                target="_blank"
+                style="padding:8px 16px;background:#28a745;color:white;border-radius:4px;text-decoration:none;display:inline-block;">
+                Manage Sandbox Gateways in PaymentHood Console
+            </a>';
+}
+
+function paymenthood_getManageLiveGatewaysLink()
+{
+    $liveAppId = PaymentHoodHandler::getGatewayLiveAppId();
+    $manageUrl = PaymentHoodHandler::paymenthood_ConsoleUrl() . '/' . urlencode($liveAppId) . '/gateways';
+    return '<a href="' . htmlspecialchars($manageUrl) . '" 
+                target="_blank"
+                style="padding:8px 16px;background:#28a745;color:white;border-radius:4px;text-decoration:none;display:inline-block;">
+                Manage Live Gateways in PaymentHood Console
+            </a>';
+}
+
 function paymenthood_handleActivationReturn()
 {
     if (isset($_GET['licenseId']) && isset($_GET['authorizationCode'])) {
@@ -107,7 +144,7 @@ function paymenthood_handleActivationReturn()
         $url = $baseUrl . "/licenses/" . urlencode($licenseId);
 
         $ch = curl_init($url);
-        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_HTTPGET, true);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_HTTPHEADER, [
             "Authorization: Bearer " . $authorizationCode,
@@ -127,7 +164,7 @@ function paymenthood_handleActivationReturn()
         if ($httpCode == 200 && !empty($response)) {
             // Parse JSON array response
             $apps = json_decode($response, true);
-            
+
             if (!is_array($apps)) {
                 PaymentHoodHandler::safeLogModuleCall('gateway_activation_invalid_response', [
                     'url' => $url
@@ -159,11 +196,14 @@ function paymenthood_handleActivationReturn()
                     continue;
                 }
 
-                // Save credentials with sandbox suffix if needed
-                $suffix = $isSandbox ? '_sandbox' : '';
-                paymenthood_saveGatewaySetting(paymenthood_GATEWAY, 'appId' . $suffix, $appId);
-                paymenthood_saveGatewaySetting(paymenthood_GATEWAY, 'token' . $suffix, $appAuthCode);
-                paymenthood_saveGatewaySetting(paymenthood_GATEWAY, 'isSandbox' . $suffix, $isSandbox ? '1' : '0');
+                // Save credentials with descriptive field names
+                if ($isSandbox) {
+                    paymenthood_saveGatewaySetting(paymenthood_GATEWAY, 'SandboxAppId', $appId);
+                    paymenthood_saveGatewaySetting(paymenthood_GATEWAY, 'SandboxAppToken', $appAuthCode);
+                } else {
+                    paymenthood_saveGatewaySetting(paymenthood_GATEWAY, 'LiveAppId', $appId);
+                    paymenthood_saveGatewaySetting(paymenthood_GATEWAY, 'LiveAppToken', $appAuthCode);
+                }
 
                 PaymentHoodHandler::safeLogModuleCall('gateway_credentials_saved', [
                     'appId' => $appId,
@@ -176,9 +216,12 @@ function paymenthood_handleActivationReturn()
 
             // Mark gateway as activated
             paymenthood_saveGatewaySetting(paymenthood_GATEWAY, 'activated', '1');
-            
-            // Set sandbox mode as default
+
+            // Set sandbox mode as default (on = checkbox checked)
             paymenthood_saveGatewaySetting(paymenthood_GATEWAY, 'IsSandboxActivated', 'on');
+
+            // Store license Id
+            paymenthood_saveGatewaySetting(paymenthood_GATEWAY, 'licenseId', $licenseId);
 
             // Redirect to clean URL (remove query parameters)
             $cleanUrl = strtok($_SERVER['REQUEST_URI'], '?');
@@ -332,14 +375,14 @@ function paymenthood_appendInvoiceNote($invoiceId, $text)
 {
     try {
         $existing = Capsule::table('tblinvoices')
-            ->where('id', (int)$invoiceId)
+            ->where('id', (int) $invoiceId)
             ->value('notes');
 
         $existing = is_string($existing) ? trim($existing) : '';
         $newNotes = $existing !== '' ? ($existing . "\n" . $text) : $text;
 
         Capsule::table('tblinvoices')
-            ->where('id', (int)$invoiceId)
+            ->where('id', (int) $invoiceId)
             ->update(['notes' => $newNotes]);
 
         PaymentHoodHandler::safeLogModuleCall('gateway_invoice_note_appended', [
@@ -481,10 +524,10 @@ function paymenthood_refund($params)
             $refundStatus = $response['paymentState'] ?? '';
             if ($refundStatus === 'Refunded' || $refundStatus === 'Refunding') {
                 $refundTransactionId = $response['refundId'] ?? ('refund_' . $paymentId);
-                
+
                 // Append note to invoice about the refund
                 paymenthood_appendInvoiceNote($invoiceId, 'Refund processed via PaymentHood (Transaction: ' . $refundTransactionId . '). Amount: $' . number_format($refundAmount, 2) . ' ' . $currency . '. Please manually update invoice status if needed.');
-                
+
                 PaymentHoodHandler::safeLogModuleCall('gateway_refund_success', [
                     'invoiceId' => $invoiceId,
                     'paymentId' => $paymentId,
@@ -493,7 +536,7 @@ function paymenthood_refund($params)
                     'refundId' => $refundTransactionId,
                     'status' => $refundStatus
                 ]);
-                
+
                 // WHMCS handles refund recording automatically
                 return [
                     'status' => 'success',
@@ -545,10 +588,10 @@ function paymenthood_refund($params)
             $httpCode = $response['_httpCode'] ?? 0;
             if ($httpCode >= 200 && $httpCode < 300) {
                 $refundTransactionId = 'manual_refund_' . $paymentId;
-                
+
                 // Append note to invoice about the manual refund
                 paymenthood_appendInvoiceNote($invoiceId, 'MARKED AS REFUNDED via PaymentHood (Transaction: ' . $refundTransactionId . '). Amount: $' . number_format($refundAmount, 2) . ' ' . $currency . '. WARNING: Money was NOT automatically returned to customer - YOU MUST REFUND MANUALLY. Please update invoice status after manual refund is completed.');
-                
+
                 PaymentHoodHandler::safeLogModuleCall('gateway_refund_success', [
                     'invoiceId' => $invoiceId,
                     'paymentId' => $paymentId,
@@ -557,7 +600,7 @@ function paymenthood_refund($params)
                     'refundId' => $refundTransactionId,
                     'manualRefund' => true
                 ]);
-                
+
                 // WHMCS handles refund recording automatically
                 return [
                     'status' => 'success',

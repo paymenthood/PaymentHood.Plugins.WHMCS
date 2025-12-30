@@ -13,6 +13,110 @@ if (defined('WHMCS_MAIL') && WHMCS_MAIL) {
 class PaymentHoodHandler
 {
     const PAYMENTHOOD_GATEWAY = 'paymenthood';
+    
+    private static function normalizeYesNoToBool($rawValue): bool
+    {
+        if (is_string($rawValue)) {
+            $normalized = strtolower(trim($rawValue));
+            if (in_array($normalized, ['on', '1', 'yes', 'true'], true)) {
+                return true;
+            }
+            if (in_array($normalized, ['', '0', 'no', 'false'], true)) {
+                return false;
+            }
+            // Any other non-empty string (including corrupted long strings) => treat as enabled
+            return $normalized !== '';
+        }
+        
+        return !empty($rawValue);
+    }
+
+    /**
+     * Best-effort check for whether WHMCS considers this gateway module activated.
+     *
+     * Important: WHMCS's getGatewayVariables() will hard-stop execution (die/exit)
+     * when the gateway is not activated. So we must not call getGatewayVariables()
+     * unless this returns true.
+     */
+    private static function isWhmcsGatewayActivated(): bool
+    {
+        try {
+            $type = Capsule::table('tblpaymentgateways')
+                ->where('gateway', self::PAYMENTHOOD_GATEWAY)
+                ->whereRaw('LOWER(setting) = ?', ['type'])
+                ->value('value');
+
+            $type = is_string($type) ? trim($type) : $type;
+            return $type !== null && $type !== '';
+        } catch (\Throwable $e) {
+            // If DB is unavailable for some reason, treat as not activated to stay safe.
+            return false;
+        }
+    }
+    
+    /**
+     * Returns true when sandbox mode is enabled (IsSandboxActivated).
+     * - Prefers WHMCS gateway variables when available
+     * - Falls back to tblpaymentgateways when gateway variables are unavailable
+     * - Attempts decrypt on long non-standard values if decrypt() is available
+     *
+     * This method is read-only (does not write to the DB).
+     */
+    public static function isSandboxModeEnabled(): bool
+    {
+        // Ensure WHMCS gateway helpers are available in all contexts (addon, hooks, cron, etc.)
+        if (!function_exists('getGatewayVariables') && defined('ROOTDIR')) {
+            $gatewayFunctionsPath = ROOTDIR . '/includes/gatewayfunctions.php';
+            if (is_file($gatewayFunctionsPath)) {
+                require_once $gatewayFunctionsPath;
+            }
+        }
+        if (!function_exists('decrypt') && defined('ROOTDIR')) {
+            $functionsPath = ROOTDIR . '/includes/functions.php';
+            if (is_file($functionsPath)) {
+                require_once $functionsPath;
+            }
+        }
+        
+        $rawSandboxValue = null;
+
+        // Only call getGatewayVariables() when the gateway is activated.
+        // Otherwise WHMCS will die with: Gateway Module "paymenthood" Not Activated
+        if (function_exists('getGatewayVariables') && self::isWhmcsGatewayActivated()) {
+            $gatewayVars = getGatewayVariables(self::PAYMENTHOOD_GATEWAY);
+            $rawSandboxValue = $gatewayVars['IsSandboxActivated'] ?? null;
+        }
+        
+        if ($rawSandboxValue === null) {
+            $rawSandboxValue = Capsule::table('tblpaymentgateways')
+                ->where('gateway', self::PAYMENTHOOD_GATEWAY)
+                ->whereRaw('LOWER(setting) = ?', ['issandboxactivated'])
+                ->value('value');
+        }
+        
+        if ($rawSandboxValue === null) {
+            $rawSandboxValue = '';
+        }
+        
+        // If a long non-standard value is stored, try to decrypt it.
+        if (is_string($rawSandboxValue)) {
+            $trimmed = trim($rawSandboxValue);
+            $normalized = strtolower($trimmed);
+            $isStandard = in_array($normalized, ['on', '1', 'yes', 'true', '', '0', 'no', 'false'], true);
+            
+            if (!$isStandard && $trimmed !== '' && strlen($trimmed) > 10 && function_exists('decrypt')) {
+                try {
+                    $rawSandboxValue = (string) decrypt($trimmed);
+                } catch (\Throwable $e) {
+                    // Ignore decrypt failure; fall back to best-effort normalization
+                }
+            } else {
+                $rawSandboxValue = $trimmed;
+            }
+        }
+        
+        return self::normalizeYesNoToBool($rawSandboxValue);
+    }
 
     /**
      * Safe wrapper for logging that works across WHMCS contexts
@@ -50,6 +154,37 @@ class PaymentHoodHandler
         error_log('PaymentHood Module: ' . json_encode($logData));
     }
 
+    private static function appendInvoiceNoteIfMissing(int $invoiceId, string $marker, string $noteLine): void
+    {
+        if ($invoiceId <= 0 || $marker === '' || $noteLine === '') {
+            return;
+        }
+
+        try {
+            $existing = Capsule::table('tblinvoices')
+                ->where('id', $invoiceId)
+                ->value('notes');
+
+            $existing = is_string($existing) ? $existing : '';
+            if ($existing !== '' && stripos($existing, $marker) !== false) {
+                return;
+            }
+
+            $newNotes = trim($existing);
+            $newNotes = $newNotes !== '' ? ($newNotes . "\n" . $noteLine) : $noteLine;
+
+            Capsule::table('tblinvoices')
+                ->where('id', $invoiceId)
+                ->update(['notes' => $newNotes]);
+        } catch (\Throwable $e) {
+            self::safeLogModuleCall('appendInvoiceNoteIfMissing_error', [
+                'invoiceId' => $invoiceId,
+            ], [
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
     public static function handleInvoice(array $params)
     {
         try {
@@ -63,6 +198,7 @@ class PaymentHoodHandler
             $credentials = self::getGatewayCredentials();
             $appId = $credentials['appId'];
             $token = $credentials['token'];
+            $useSandbox = !empty($credentials['useSandbox']);
 
             $orderId = null;
 
@@ -213,6 +349,23 @@ class PaymentHoodHandler
                 $currency = $params['currency'];
                 $clientEmail = $params['clientdetails']['email'] ?? '';
 
+                // Check if invoice contains any recurring/subscription items
+                $hasRecurringItem = false;
+                if ($invoiceId) {
+                    $hasRecurringItem = Capsule::table('tblinvoiceitems as ii')
+                        ->join('tblhosting as h', 'ii.relid', '=', 'h.id')
+                        ->where('ii.invoiceid', $invoiceId)
+                        ->where('ii.type', 'Hosting')
+                        ->whereNotIn('h.billingcycle', ['One Time', 'Free', ''])
+                        ->exists();
+                }
+
+                self::safeLogModuleCall('handler_check_recurring_items', [
+                    'invoiceId' => $invoiceId
+                ], [
+                    'hasRecurringItem' => $hasRecurringItem
+                ]);
+
                 $callbackUrl = rtrim(self::getSystemUrl(), '/') . '/modules/gateways/callback/paymenthood.php?invoiceid=' . $invoiceId;
                 $postData = [
                     'referenceId' => (string) $invoiceId,
@@ -227,9 +380,35 @@ class PaymentHoodHandler
                         ],
                     ],
                     'returnUrl' => $callbackUrl,
+                    'showPayRecurringInCheckout' => $hasRecurringItem,
                 ];
+                self::safeLogModuleCall('handler_redirect_decision foooooooo', [
+                    'postData' => $postData
+                ], []);
 
-                $response = self::callApi(self::paymenthood_getPaymentBaseUrl() . "/apps/{$appId}/payments/hosted-page", $postData, $token);
+                try {
+                    $response = self::callApi(self::paymenthood_getPaymentBaseUrl() . "/apps/{$appId}/payments/hosted-page", $postData, $token);
+                } catch (\Throwable $apiEx) {
+                    $msg = (string) $apiEx->getMessage();
+                    $needle = 'Can not find any profile for the app for specific currency';
+
+                    if ($msg !== '' && stripos($msg, $needle) !== false) {
+                        $manageUrl = rtrim(self::paymenthood_ConsoleUrl(), '/') . '/' . urlencode((string) $appId) . '/gateways';
+                        $sandboxNotice = '';
+                        if (!empty($useSandbox)) {
+                            $sandboxNotice = '<div id="paymenthood-sandbox-notice" class="alert alert-info" role="alert" style="margin-bottom:10px;"><strong>Sandbox Mode</strong> is enabled for PaymentHood. Payments will use sandbox credentials.</div>';
+                        }
+                        $html = '<div class="alert alert-warning" role="alert">'
+                            . '<strong>PaymentHood is not configured for this currency.</strong><br />'
+                            . 'You have not defined any payment gateway/profile for this app and currency yet.<br />'
+                            . 'Please configure your gateways in the PaymentHood Console: '
+                            . '<a href="' . htmlspecialchars($manageUrl) . '" target="_blank" rel="noopener noreferrer">Manage PaymentHood Gateways</a>.'
+                            . '</div>';
+                        return $sandboxNotice . $html;
+                    }
+
+                    throw $apiEx;
+                }
                 self::safeLogModuleCall('handler_payment_created', [
                     'invoiceId' => $invoiceId,
                     'amount' => $amount,
@@ -241,6 +420,14 @@ class PaymentHoodHandler
 
                 if (empty($response['redirectUrl'])) {
                     return '<p>Payment gateway returned an invalid response.</p>';
+                }
+
+                // Record sandbox usage in invoice notes (do not overwrite existing notes).
+                if (!empty($useSandbox) && !empty($invoiceId)) {
+                    $currencySafe = is_string($currency) ? trim($currency) : '';
+                    $noteLine = '[PaymentHood Sandbox] Sandbox Mode enabled for this payment.'
+                        . ($currencySafe !== '' ? (' Currency: ' . $currencySafe . '.') : '');
+                    self::appendInvoiceNoteIfMissing((int) $invoiceId, '[PaymentHood Sandbox]', $noteLine);
                 }
 
                 // Redirect immediately to PaymentHood
@@ -255,7 +442,7 @@ class PaymentHoodHandler
                 'isInvoicePayment' => $isInvoicePayment
             ], []);
 
-            return self::renderInvoiceUI((string) $invoiceId, $appId, $token, false);
+            return self::renderInvoiceUI((string) $invoiceId, $appId, $token, false, $useSandbox);
 
         } catch (\Throwable $ex) {
             self::safeLogModuleCall('handler_invoice_exception', [
@@ -265,14 +452,24 @@ class PaymentHoodHandler
                 'error' => $ex->getMessage(),
                 'trace' => $ex->getTraceAsString()
             ]);
-            return '<div class="alert alert-danger">paymentHood Error: ' . htmlspecialchars($ex->getMessage()) . '</div>';
+            $isSandbox = self::isSandboxModeEnabled();
+            $sandboxNotice = '';
+            if ($isSandbox) {
+                $sandboxNotice = '<div id="paymenthood-sandbox-notice" class="alert alert-info" role="alert" style="margin-bottom:10px;"><strong>Sandbox Mode</strong> is enabled for PaymentHood. Payments will use sandbox credentials.</div>';
+            }
+            return $sandboxNotice . '<div class="alert alert-danger">paymentHood Error: ' . htmlspecialchars($ex->getMessage()) . '</div>';
         }
     }
 
-    public static function renderInvoiceUI($invoiceId, $appId, $token, $autoSubmit = false)
+    public static function renderInvoiceUI($invoiceId, $appId, $token, $autoSubmit = false, $useSandbox = false)
     {
         // Check if payment already exists
         $paymentStatus = self::checkInvoiceStatus($invoiceId, $appId, $token);
+
+        $sandboxNotice = '';
+        if ($useSandbox) {
+            $sandboxNotice = '<div id="paymenthood-sandbox-notice" class="alert alert-info" role="alert" style="margin-bottom:10px;"><strong>Sandbox Mode</strong> is enabled for PaymentHood. Payments will use sandbox credentials.</div>';
+        }
 
         self::safeLogModuleCall('handler_render_invoice_ui', [
             'invoiceId' => $invoiceId,
@@ -300,7 +497,8 @@ class PaymentHoodHandler
                     'invoiceId' => $invoiceId,
                     'redirectUrl' => $redirectUrl
                 ], []);
-                $html = '<div class="alert alert-info">A payment session is already in progress for this invoice.</div>';
+                $html = $sandboxNotice;
+                $html .= '<div class="alert alert-info">A payment session is already in progress for this invoice.</div>';
                 $html .= '<a href="' . htmlspecialchars($redirectUrl) . '" class="btn btn-primary btn-block">Continue to Payment</a>';
                 return $html . self::loadHidePaymentMethodsJS();
             }
@@ -312,14 +510,16 @@ class PaymentHoodHandler
                 'error' => 'Payment exists but redirectUrl missing',
                 'paymentId' => $paymentStatus['paymentId'] ?? null
             ]);
-            $html = '<div class="alert alert-warning">This invoice cannot be paid via PaymentHood at the moment.</div>';
+            $html = $sandboxNotice;
+            $html .= '<div class="alert alert-warning">This invoice cannot be paid via PaymentHood at the moment.</div>';
             return $html . self::loadHidePaymentMethodsJS();
         } else {
             // No payment found, show the payment button
             $systemUrl = self::getSystemUrl();
             $formAction = $systemUrl . 'viewinvoice.php?id=' . $invoiceId;
 
-            $html = '<form id="paymenthood-form" method="post" action="' . htmlspecialchars($formAction) . '">
+            $html = $sandboxNotice;
+            $html .= '<form id="paymenthood-form" method="post" action="' . htmlspecialchars($formAction) . '">
                         <input type="hidden" name="invoiceid" value="' . htmlspecialchars($invoiceId) . '" />
                         <input type="hidden" name="paymentmethod" value="' . self::PAYMENTHOOD_GATEWAY . '" />
                         <button type="submit" class="btn btn-success btn-block">Pay Now with PaymentHood</button>
@@ -398,7 +598,7 @@ HTML;
     public static function processUnpaidInvoices()
     {
         self::safeLogModuleCall('handler_cron_unpaid_invoices_start', [], []);
-        
+
         // Check if PaymentHood gateway is activated
         $activated = Capsule::table('tblpaymentgateways')
             ->where('gateway', self::PAYMENTHOOD_GATEWAY)
@@ -436,7 +636,7 @@ HTML;
                 self::safeLogModuleCall(
                     'processUnpaidInvoices',
                     [
-                        'invoiceId' => $invoiceId, 
+                        'invoiceId' => $invoiceId,
                         'clientId' => $clientId,
                         'billingCycle' => $invoice->billingcycle,
                         'dueDate' => $invoice->duedate,
@@ -711,19 +911,66 @@ HTML;
         }
     }
 
+    public static function getGatewaySandboxAppId()
+    {
+        try {
+            $value = Capsule::table('tblpaymentgateways')
+                ->where('gateway', self::PAYMENTHOOD_GATEWAY)
+                ->whereRaw('LOWER(setting) = ?', ['sandboxappid'])
+                ->value('value');
+
+            $value = is_string($value) ? trim($value) : $value;
+            return $value !== '' ? $value : null;
+        } catch (\Throwable $e) {
+            self::safeLogModuleCall('getGatewaySandboxAppId_error', [], [
+                'error' => $e->getMessage(),
+            ]);
+            return null;
+        }
+    }
+
+    public static function getGatewayLiveAppId()
+    {
+        try {
+            $value = Capsule::table('tblpaymentgateways')
+                ->where('gateway', self::PAYMENTHOOD_GATEWAY)
+                ->whereRaw('LOWER(setting) = ?', ['liveappid'])
+                ->value('value');
+
+            $value = is_string($value) ? trim($value) : $value;
+            return $value !== '' ? $value : null;
+        } catch (\Throwable $e) {
+            self::safeLogModuleCall('getGatewayLiveAppId_error', [], [
+                'error' => $e->getMessage(),
+            ]);
+            return null;
+        }
+    }
+
     public static function getGatewayCredentials()
     {
+        self::safeLogModuleCall('getGatewayCredentials - start', [], []);
+
+        $useSandbox = self::isSandboxModeEnabled();
+
+        self::safeLogModuleCall('getGatewayCredentials - mode selected', [
+            'useSandbox' => $useSandbox
+        ], []);
+
+        $appIdSetting = $useSandbox ? 'SandboxAppId' : 'LiveAppId';
+        $tokenSetting = $useSandbox ? 'SandboxAppToken' : 'LiveAppToken';
+
+        // Fetch credentials as stored in tblpaymentgateways.
         $rows = Capsule::table('tblpaymentgateways')
             ->where('gateway', 'paymenthood')
-            ->whereIn('setting', ['appId', 'token', 'webhookToken'])
+            ->whereIn('setting', [$appIdSetting, $tokenSetting, 'webhookToken'])
             ->get()
             ->keyBy('setting');
 
-        $appId = isset($rows['appId']) ? $rows['appId']->value : null;
-        $token = isset($rows['token']) ? $rows['token']->value : null;
+        $appId = isset($rows[$appIdSetting]) ? $rows[$appIdSetting]->value : null;
+        $token = isset($rows[$tokenSetting]) ? $rows[$tokenSetting]->value : null;
         $webhookToken = isset($rows['webhookToken']) ? $rows['webhookToken']->value : null;
-
-        return ['appId' => $appId, 'token' => $token, 'webhookToken' => $webhookToken];
+        return ['appId' => $appId, 'token' => $token, 'webhookToken' => $webhookToken, 'useSandbox' => $useSandbox];
     }
 
     public static function getSystemUrl()
@@ -740,18 +987,23 @@ HTML;
         return null;
     }
 
+    public static function paymenthood_ConsoleUrl(): string
+    {
+        return rtrim('https://admin-stage.payment-controller.com/', '/');
+    }
+
     public static function paymenthood_getPaymentAppBaseUrl(): string
     {
-        return rtrim('https://appapi.paymenthood.com/api/', '/');
+        return rtrim('https://ezpin-payment-app-service-stage-ckbcd9ekc7bzcjfx.westus-01.azurewebsites.net/api/', '/');
     }
 
     public static function paymenthood_grantAuthorizationUrl(): string
     {
-        return rtrim('https://console.paymenthood.com/auth/signin', '/');
+        return self::paymenthood_ConsoleUrl() . '/auth/signin';
     }
 
     public static function paymenthood_getPaymentBaseUrl(): string
     {
-        return rtrim('https://api.paymenthood.com/api/v1', '/');
+        return rtrim('https://api-stage.payment-controller.com/api/v1', '/');
     }
 }
