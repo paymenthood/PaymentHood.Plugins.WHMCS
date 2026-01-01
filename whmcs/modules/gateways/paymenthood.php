@@ -82,15 +82,15 @@ function paymenthood_getActivationLink($activated)
         . "://{$_SERVER['HTTP_HOST']}{$_SERVER['REQUEST_URI']}";
 
     $credentials = PaymentHoodHandler::getGatewayCredentials();
-    $appId = $credentials['appId'];
+    $licenseId = $credentials['licenseId'];
 
     $paymenthoodUrl = PaymentHoodHandler::paymenthood_grantAuthorizationUrl()
         . '?returnUrl=' . urlencode($currentUrl)
-        . '&appId=' . urlencode($appId)
+        . '&licenseId=' . urlencode($licenseId)
         . '&grantAuthorization=' . urlencode('true');
 
     PaymentHoodHandler::safeLogModuleCall('gateway_activation_link_generated', [
-        'appId' => $appId,
+        'licenseId' => $licenseId,
         'returnUrl' => $currentUrl,
         'activated' => $activated
     ], [
