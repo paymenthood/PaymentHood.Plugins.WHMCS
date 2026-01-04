@@ -1,0 +1,29 @@
+{
+  "schema": "1.0",
+  "type": "whmcs-gateways",
+  "name": "paymenthood",
+  "license": "proprietary",
+  "category": "payment-gateways",
+  "description": {
+    "name": "PaymentHood",
+    "tagline": "All-in-one payment orchestration platform unifying multiple gateways into one integration.",
+    "long": "PaymentHood unifies multiple payment gateways into a single integration, enabling businesses to accept global payments securely without complex development. This WHMCS plugin takes under five minutes to set up and supports one-time and subscription payments with automated payment verification.",
+    "features": [
+      "Unified payment orchestration - one API for multiple gateways",
+      "Automated subscription and recurring billing",
+      "Multi-currency and global payment methods support",
+      "Advanced fraud detection and smart routing",
+      "Real-time transaction insights and analytics",
+      "OAuth2 secure activation with sandbox and live modes"
+    ]
+  },
+  "logo": {
+    "filename": "paymenthood-logo.png"
+  },
+  "authors": [
+    {
+      "name": "PaymentHood",
+      "homepage": "https://paymenthood.com/"
+    }
+  ]
+}

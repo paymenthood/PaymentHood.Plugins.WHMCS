@@ -23,6 +23,18 @@ define('paymenthood_GATEWAY', 'paymenthood');
 // Handle activation return before any output
 paymenthood_handleActivationReturn();
 
+/**
+ * Gateway module metadata (used by WHMCS module discovery/UI, including Apps & Integrations).
+ */
+function paymenthood_MetaData()
+{
+    return [
+        'DisplayName' => 'PaymentHood (Secure Invoice Payments)',
+        // WHMCS gateway module API version (1.1 is current for modern gateway modules).
+        'APIVersion' => '1.1',
+    ];
+}
+
 function paymenthood_config()
 {
     // Get current activation status
@@ -42,7 +54,7 @@ function paymenthood_config()
         ],
         'Description' => [
             'Type' => 'System',
-            'Value' => 'Pay invoices securely using PaymentHood.'
+            'Value' => 'Accept payments through PaymentHood with support for multiple payment gateways, subscription management, and secure payment processing. Seamlessly integrate with your WHMCS billing system for automated invoice payments.'
         ],
         'activation' => [
             'FriendlyName' => 'Activation',

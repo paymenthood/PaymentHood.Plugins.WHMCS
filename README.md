@@ -55,13 +55,15 @@ paymenthood-plugins/
         │
         └── gateways/
             ├── paymenthood.php                  # Gateway configuration & entry point
+            ├── whmcs.json                       # Module metadata for Apps & Integrations
+            ├── paymenthood-logo.png             # Module logo
             └── callback/
                 └── paymenthood.php              # Webhook & return URL handler
 ```
 
 ### Component Details
 
-#### 🔧 **Gateway Module** (`modules/gateways/paymenthood.php`)
+#### 🔧 **Gateway Module** (`modules/gateways/paymenthood/paymenthood.php`)
 The main gateway configuration file that defines:
 - Gateway metadata and display name
 - OAuth2 activation flow
@@ -154,6 +156,8 @@ Smarty template for subscription management:
    /path/to/whmcs/includes/hooks/
    /path/to/whmcs/modules/addons/paymenthood/
    /path/to/whmcs/modules/gateways/paymenthood.php
+   /path/to/whmcs/modules/gateways/whmcs.json
+   /path/to/whmcs/modules/gateways/paymenthood-logo.png
    /path/to/whmcs/modules/gateways/callback/paymenthood.php
    ```
 
@@ -259,7 +263,7 @@ Send Email Notification
 ### PaymentHood Endpoints Used
 
 #### App Management
-- `POST /apps/{appId}/generate-bot-token` - OAuth token generation
+- `POST /apps/{appId}/generate-bot-token` - OAuth token generation (Note: This endpoint is now handled via OAuth2 flow)
 - `PATCH /apps/{appId}` - Webhook configuration
 
 #### Payment Processing
