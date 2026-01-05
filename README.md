@@ -11,14 +11,13 @@
 ## 🌟 Features
 
 ### Core Payment Capabilities
-- **Hosted Payment Pages**: Secure, PCI-compliant checkout experience
 - **One-Time Payments**: Process single invoice payments
 - **Recurring Subscriptions**: Automatic payment handling for subscription-based services
 - **Auto-Capture**: Immediate payment capture upon authorization
 - **Multi-Currency Support**: Process payments in various currencies
 
 ### Advanced Functionality
-- **OAuth2 Integration**: Secure app activation and authorization
+- **Machine-to-Machine Communication**: Secure server-to-server integration between WHMCS and PaymentHood core servers
 - **Webhook Support**: Real-time payment status notifications
 - **Automated Payment Processing**: Cron-based auto-payment for due invoices
 - **Payment Method Management**: Customer portal for managing saved payment methods
@@ -66,8 +65,7 @@ paymenthood-plugins/
 #### 🔧 **Gateway Module** (`modules/gateways/paymenthood/paymenthood.php`)
 The main gateway configuration file that defines:
 - Gateway metadata and display name
-- OAuth2 activation flow
-- App ID and access token management
+- App ID and access token management for Sandbox and Live
 - Webhook token registration
 - Payment link generation for invoices
 
@@ -151,7 +149,7 @@ Smarty template for subscription management:
 
 ### Step 1: File Installation
 1. Download the plugin files
-2. Copy the `whmcs/` directory contents to your WHMCS installation root:
+2. Copy the full directory contents to your WHMCS installation root:
    ```
    /path/to/whmcs/includes/hooks/
    /path/to/whmcs/modules/addons/paymenthood/
@@ -163,7 +161,7 @@ Smarty template for subscription management:
 
 ### Step 2: WHMCS Configuration
 1. Log in to WHMCS Admin Panel
-2. Navigate to **Setup → Payments → Payment Gateways**
+2. Navigate to **System Settings → Payment Gateways**
 3. Click on **All Payment Gateways** tab
 4. Find **PaymentHood** and click **Activate**
 
@@ -177,7 +175,7 @@ Smarty template for subscription management:
 ### Step 4: Verify Installation
 - Check **System Logs** for successful activation entries
 - Ensure "Account is activated" message appears in gateway settings
-- Test with a sample invoice
+- Test with a sample invoice in Sandbox or Live
 
 ---
 
@@ -225,58 +223,6 @@ The PaymentHood cron hook runs automatically after each WHMCS cron execution.
 4. If successful, invoice marked as paid
 5. If failed, customer receives payment reminder
 6. Customer can manually pay or update payment method
-
-### Backend Processing Flow
-
-```
-Invoice Created
-    ↓
-[Is Recurring?] → YES → Save for Auto-Payment
-    ↓ NO
-Manual Payment Button Shown
-    ↓
-Customer Clicks Pay
-    ↓
-API Call to PaymentHood
-    ↓
-Hosted Page URL Returned
-    ↓
-Customer Redirected
-    ↓
-Payment Processed
-    ↓
-Webhook Received
-    ↓
-[Validate Token]
-    ↓
-[Check Payment State]
-    ↓
-Update Invoice Status
-    ↓
-Send Email Notification
-```
-
----
-
-## 🔌 API Integration
-
-### PaymentHood Endpoints Used
-
-#### App Management
-- `POST /apps/{appId}/generate-bot-token` - OAuth token generation (Note: This endpoint is now handled via OAuth2 flow)
-- `PATCH /apps/{appId}` - Webhook configuration
-
-#### Payment Processing
-- `POST /apps/{appId}/payments/hosted-page` - Create hosted payment
-- `POST /apps/{appId}/payments/auto-payment` - Create automated payment
-- `GET /apps/{appId}/payments/referenceId:{id}` - Retrieve payment status
-
-### Base URLs
-- **Production API**: `https://api.paymenthood.com/api/v1`
-- **App API**: `https://appapi.paymenthood.com/api/`
-- **Console**: `https://console.paymenthood.com`
-
----
 
 ## 🛠️ Development & Debugging
 
@@ -362,7 +308,6 @@ The plugin interacts with standard WHMCS tables:
 
 ### Getting Help
 - **PaymentHood Support**: support@paymenthood.com
-- **Documentation**: https://docs.paymenthood.com
 - **WHMCS Forums**: Include "PaymentHood" in your post title
 
 ### Contributing
@@ -398,7 +343,6 @@ This plugin is proprietary software provided by PaymentHood. All rights reserved
 **PaymentHood**  
 Website: https://paymenthood.com  
 Email: support@paymenthood.com  
-Documentation: https://docs.paymenthood.com
 
 ---
 
