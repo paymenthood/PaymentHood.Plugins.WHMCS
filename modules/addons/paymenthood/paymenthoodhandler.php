@@ -949,14 +949,7 @@ HTML;
 
     public static function getGatewayCredentials()
     {
-        self::safeLogModuleCall('getGatewayCredentials - start', [], []);
-
         $useSandbox = self::isSandboxModeEnabled();
-
-        self::safeLogModuleCall('getGatewayCredentials - mode selected', [
-            'useSandbox' => $useSandbox
-        ], []);
-
         $appIdSetting = $useSandbox ? 'SandboxAppId' : 'LiveAppId';
         $tokenSetting = $useSandbox ? 'SandboxAppToken' : 'LiveAppToken';
 

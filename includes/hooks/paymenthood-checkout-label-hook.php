@@ -30,9 +30,6 @@ add_hook('ClientAreaPageCart', 1, function ($vars) {
             }
 
             $sysname = strtolower((string) ($gateway['sysname'] ?? ($gateway['module'] ?? $idx)));
-            PaymentHoodHandler::safeLogModuleCall('ClientAreaPageCart', [], [
-                'sysname' => $sysname
-            ]);
             if ($sysname !== 'paymenthood') {
                 continue;
             }
