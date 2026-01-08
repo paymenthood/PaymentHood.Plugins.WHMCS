@@ -367,6 +367,7 @@ class PaymentHoodHandler
                 ]);
 
                 $callbackUrl = rtrim(self::getSystemUrl(), '/') . '/modules/gateways/callback/paymenthood.php?invoiceid=' . $invoiceId;
+                
                 $postData = [
                     'referenceId' => (string) $invoiceId,
                     'amount' => $amount,
@@ -382,9 +383,6 @@ class PaymentHoodHandler
                     'returnUrl' => $callbackUrl,
                     'showPayRecurringInCheckout' => $hasRecurringItem,
                 ];
-                self::safeLogModuleCall('handler_redirect_decision foooooooo', [
-                    'postData' => $postData
-                ], []);
 
                 try {
                     $response = self::callApi(self::paymenthood_getPaymentBaseUrl() . "/apps/{$appId}/payments/hosted-page", $postData, $token);

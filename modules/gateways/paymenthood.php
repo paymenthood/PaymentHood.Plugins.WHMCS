@@ -235,6 +235,9 @@ function paymenthood_handleActivationReturn()
             // Store license Id
             paymenthood_saveGatewaySetting(paymenthood_GATEWAY, 'licenseId', $licenseId);
 
+            // Create custom field for payment provider storage
+            paymenthood_createCustomFields();
+
             // Redirect to clean URL (remove query parameters)
             $cleanUrl = strtok($_SERVER['REQUEST_URI'], '?');
             header("Location: " . $cleanUrl);
@@ -360,6 +363,64 @@ function paymenthood_saveGatewaySetting($gateway, $setting, $value)
             'gateway' => $gateway,
             'setting' => $setting
         ], [
+            'error' => $e->getMessage()
+        ]);
+    }
+}
+
+function paymenthood_createCustomFields()
+{
+    try {
+        $now = date('Y-m-d H:i:s');
+
+        $fields = [
+            [
+                'fieldname' => 'paymenthood_provider',
+                'description' => 'PaymentHood Payment Provider',
+            ],
+            [
+                'fieldname' => 'paymenthood_app_id',
+                'description' => 'PaymentHood App ID',
+            ],
+            [
+                'fieldname' => 'paymenthood_payment_id',
+                'description' => 'PaymentHood Payment ID',
+            ],
+        ];
+
+        foreach ($fields as $field) {
+            $fieldName = $field['fieldname'];
+            $exists = Capsule::table('tblcustomfields')
+                ->where('type', 'invoice')
+                ->where('fieldname', $fieldName)
+                ->exists();
+
+            if ($exists) {
+                continue;
+            }
+
+            Capsule::table('tblcustomfields')->insert([
+                'type' => 'invoice',
+                'fieldname' => $fieldName,
+                'fieldtype' => 'text',
+                'description' => $field['description'],
+                'fieldoptions' => '',
+                'regexpr' => '',
+                'adminonly' => 'on',
+                'required' => '',
+                'showorder' => 'on',
+                'showinvoice' => '',
+                'sortorder' => 0,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+            PaymentHoodHandler::safeLogModuleCall('gateway_custom_field_created', [
+                'fieldname' => $fieldName,
+            ], []);
+        }
+    } catch (\Throwable $e) {
+        PaymentHoodHandler::safeLogModuleCall('gateway_custom_field_error', [], [
             'error' => $e->getMessage()
         ]);
     }

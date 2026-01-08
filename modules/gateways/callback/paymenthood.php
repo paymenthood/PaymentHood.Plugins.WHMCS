@@ -148,33 +148,96 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
     $paymentState = $data['paymentState'] ?? 'unknown';
     $transactionId = $data['paymentId'] ?? 'N/A'; // fallback
 
-    // Get existing invoice data using WHMCS API
-    $invoiceData = localAPI('GetInvoice', ['invoiceid' => $invoiceId]);
-    $existing = $invoiceData['notes'] ?? '';
+    // Extract and store provider name if available
+    $providerName = null;
+    if (isset($data['payInfo']['paymentProfile']['paymentProvider']['provider'])) {
+        $providerName = $data['payInfo']['paymentProfile']['paymentProvider']['provider'];
+    }
 
-    if (strpos($existing, 'Payment provider state') === false) {
+    // Store PaymentHood fields on invoice custom fields (independent of paymentState)
+    // This is what the admin report uses to build the Details URL.
+    paymenthood_upsertInvoicePaymenthoodCustomFields(
+        $invoiceId,
+        (string) $appId,
+        !empty($data['paymentId']) ? (string) $data['paymentId'] : '',
+        !empty($providerName) ? (string) $providerName : ''
+    );
+
+
+    // Store provider in transaction description if we have both transaction ID and provider
+    if ($providerName && $transactionId !== 'N/A') {
         try {
-            $newNotes = $existing . "\nPayment provider state: $paymentState";
-            $command = 'UpdateInvoice';
-            $postData = [
-                'invoiceid' => $invoiceId,
-                'notes' => $newNotes
-            ];
-            $results = localAPI($command, $postData);
+            // Update transaction description
+            $result = localAPI('UpdateTransaction', [
+                'transid' => $transactionId,
+                'description' => "PaymentHood - {$providerName}"
+            ]);
 
-            PaymentHoodHandler::safeLogModuleCall('callback_invoice_notes_updated', [
+            PaymentHoodHandler::safeLogModuleCall('callback_provider_stored', [
                 'invoiceId' => $invoiceId,
-                'paymentState' => $paymentState
+                'transactionId' => $transactionId,
+                'provider' => $providerName
             ], [
-                'success' => ($results['result'] ?? '') === 'success'
+                'success' => ($result['result'] ?? '') === 'success'
             ]);
         } catch (Exception $e) {
-            PaymentHoodHandler::safeLogModuleCall('callback_invoice_notes_update_error', [
-                'invoiceId' => $invoiceId
+            PaymentHoodHandler::safeLogModuleCall('callback_provider_store_error', [
+                'invoiceId' => $invoiceId,
+                'provider' => $providerName
             ], [
                 'error' => $e->getMessage()
             ]);
         }
+    }
+
+    // Update invoice notes:
+    // - Always store Payment Provider when available (independent of paymentState)
+    // - Also store Payment provider state once
+    try {
+        $invoiceData = localAPI('GetInvoice', ['invoiceid' => $invoiceId]);
+        $notes = $invoiceData['notes'] ?? '';
+        $notes = is_string($notes) ? $notes : '';
+
+        $newNotes = $notes;
+        $changed = false;
+
+        if ($providerName) {
+            // Only add provider note if it doesn't already exist
+            if (stripos($newNotes, 'Payment Provider:') === false) {
+                $line = "Payment Provider: {$providerName}";
+                $newNotes = trim($newNotes);
+                $newNotes = $newNotes !== '' ? ($newNotes . "\n" . $line) : $line;
+                $changed = true;
+            }
+        }
+
+        if (stripos($newNotes, 'Payment provider state') === false) {
+            $line = "Payment provider state: {$paymentState}";
+            $newNotes = trim($newNotes);
+            $newNotes = $newNotes !== '' ? ($newNotes . "\n" . $line) : $line;
+            $changed = true;
+        }
+
+        if ($changed) {
+            $results = localAPI('UpdateInvoice', [
+                'invoiceid' => $invoiceId,
+                'notes' => $newNotes,
+            ]);
+
+            PaymentHoodHandler::safeLogModuleCall('callback_invoice_notes_updated', [
+                'invoiceId' => $invoiceId,
+                'paymentState' => $paymentState,
+                'provider' => $providerName,
+            ], [
+                'success' => ($results['result'] ?? '') === 'success',
+            ]);
+        }
+    } catch (Exception $e) {
+        PaymentHoodHandler::safeLogModuleCall('callback_invoice_notes_update_error', [
+            'invoiceId' => $invoiceId,
+        ], [
+            'error' => $e->getMessage(),
+        ]);
     }
 
     // decide for invoice based on payment provider state
@@ -188,8 +251,10 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
                     'invoiceId' => $invoiceId,
                     'transactionId' => $transactionId
                 ], []);
-            } else
+            } else {
+                // Record payment
                 addInvoicePayment($invoiceId, $transactionId, $data['amount'], 0, PAYMENTHOOD_GATEWAY);
+            }
         } catch (Exception $e) {
             PaymentHoodHandler::safeLogModuleCall('callback_payment_record_error', [
                 'invoiceId' => $invoiceId,
@@ -207,7 +272,7 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
                 'invoiceId' => $invoiceId,
                 'redirectUrl' => $redirectUrl
             ], []);
-            
+
             // Clear any WHMCS session data that might redirect to cart
             if (isset($_SESSION['cart'])) {
                 unset($_SESSION['cart']);
@@ -215,7 +280,7 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
             if (isset($_SESSION['orderdetails'])) {
                 unset($_SESSION['orderdetails']);
             }
-            
+
             header("Location: $redirectUrl");
             exit;
         }
@@ -288,7 +353,7 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
                 'invoiceId' => $invoiceId,
                 'redirectUrl' => $redirectUrl
             ], []);
-            
+
             // Clear any WHMCS session data that might redirect to cart
             if (isset($_SESSION['cart'])) {
                 unset($_SESSION['cart']);
@@ -296,7 +361,7 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
             if (isset($_SESSION['orderdetails'])) {
                 unset($_SESSION['orderdetails']);
             }
-            
+
             header("Location: $redirectUrl");
             exit;
         }
@@ -314,7 +379,7 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
                 'paymentState' => $paymentState,
                 'redirectUrl' => $redirectUrl
             ], []);
-            
+
             // Clear any WHMCS session data that might redirect to cart
             if (isset($_SESSION['cart'])) {
                 unset($_SESSION['cart']);
@@ -322,7 +387,7 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
             if (isset($_SESSION['orderdetails'])) {
                 unset($_SESSION['orderdetails']);
             }
-            
+
             header("Location: $redirectUrl");
             exit;
         }
@@ -349,4 +414,109 @@ function validatePaymenthoodWebhookToken(string $webhookToken): bool
 
     // Compare securely
     return hash_equals($webhookToken, $incomingToken);
+}
+
+function paymenthood_upsertInvoicePaymenthoodCustomFields(int $invoiceId, string $appId, string $paymentId, string $providerName): void
+{
+    if ($invoiceId <= 0) {
+        return;
+    }
+
+    try {
+        $requiredFields = [
+            'paymenthood_provider' => 'PaymentHood Payment Provider',
+            'paymenthood_app_id' => 'PaymentHood App ID',
+            'paymenthood_payment_id' => 'PaymentHood Payment ID',
+        ];
+
+        $customFields = Capsule::table('tblcustomfields')
+            ->where('type', 'invoice')
+            ->whereIn('fieldname', array_keys($requiredFields))
+            ->pluck('id', 'fieldname');
+
+        $missing = [];
+        foreach ($requiredFields as $fieldName => $description) {
+            if (!isset($customFields[$fieldName])) {
+                $missing[$fieldName] = $description;
+            }
+        }
+
+        if (!empty($missing)) {
+            $now = date('Y-m-d H:i:s');
+            foreach ($missing as $fieldName => $description) {
+                $exists = Capsule::table('tblcustomfields')
+                    ->where('type', 'invoice')
+                    ->where('fieldname', $fieldName)
+                    ->exists();
+                if ($exists) {
+                    continue;
+                }
+
+                Capsule::table('tblcustomfields')->insert([
+                    'type' => 'invoice',
+                    'fieldname' => $fieldName,
+                    'fieldtype' => 'text',
+                    'description' => $description,
+                    'fieldoptions' => '',
+                    'regexpr' => '',
+                    'adminonly' => 'on',
+                    'required' => '',
+                    'showorder' => 'on',
+                    'showinvoice' => '',
+                    'sortorder' => 0,
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ]);
+            }
+
+            $customFields = Capsule::table('tblcustomfields')
+                ->where('type', 'invoice')
+                ->whereIn('fieldname', array_keys($requiredFields))
+                ->pluck('id', 'fieldname');
+        }
+
+        $toWrite = [];
+        if ($providerName !== '') {
+            $toWrite['paymenthood_provider'] = $providerName;
+        }
+        if ($appId !== '') {
+            $toWrite['paymenthood_app_id'] = $appId;
+        }
+        if ($paymentId !== '') {
+            $toWrite['paymenthood_payment_id'] = $paymentId;
+        }
+
+        foreach ($toWrite as $fieldName => $value) {
+            if (!isset($customFields[$fieldName])) {
+                continue;
+            }
+            $fieldId = (int) $customFields[$fieldName];
+            if ($fieldId <= 0) {
+                continue;
+            }
+
+            $existingValue = Capsule::table('tblcustomfieldsvalues')
+                ->where('fieldid', $fieldId)
+                ->where('relid', $invoiceId)
+                ->first();
+
+            if ($existingValue) {
+                Capsule::table('tblcustomfieldsvalues')
+                    ->where('id', $existingValue->id)
+                    ->update(['value' => $value]);
+            } else {
+                Capsule::table('tblcustomfieldsvalues')->insert([
+                    'fieldid' => $fieldId,
+                    'relid' => $invoiceId,
+                    'value' => $value,
+                ]);
+            }
+        }
+    } catch (Exception $e) {
+        PaymentHoodHandler::safeLogModuleCall('callback_custom_fields_store_error', [
+            'invoiceId' => $invoiceId,
+        ], [
+            'error' => $e->getMessage(),
+        ]);
+    }
 }
