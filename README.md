@@ -35,29 +35,35 @@
 ## 📁 Project Structure
 
 ```
-paymenthood-plugins/
+PaymentHood.Plugins.WHMCS/
 │
-├── README.md                                    # This file
+├── README.md                                                    # This file
 │
-└── whmcs/                                       # WHMCS integration root
+├── includes/
+│   └── hooks/
+│       ├── paymenthood-checkout-label-hook.php                  # Checkout label customization hook
+│       ├── paymenthood-cron-hook.php                            # Cron job hook for automated payments
+│       └── paymenthood-payment-profiles-hook.php                # Payment profiles management hook
+│
+└── modules/
+    ├── addons/
+    │   └── paymenthood/
+    │       ├── paymenthoodhandler.php                           # Core handler class (business logic)
+    │       └── templates/
+    │           └── manage-subscription.tpl                      # Customer-facing subscription UI
     │
-    ├── includes/
-    │   └── hooks/
-    │       └── paymenthood-cron-hook.php        # Cron job hook for automated payments
+    ├── gateways/
+    │   ├── paymenthood.php                                      # Gateway configuration & entry point
+    │   ├── callback/
+    │   │   └── paymenthood.php                                  # Webhook & return URL handler
+    │   └── paymenthood/
+    │       ├── get-payment-profiles.php                         # Payment profiles API endpoint
+    │       ├── icon-proxy.php                                   # Payment provider icon proxy
+    │       ├── paymenthood-logo.png                             # Module logo
+    │       └── whmcs.json                                       # Module metadata for Apps & Integrations
     │
-    └── modules/
-        ├── addons/
-        │   └── paymenthood/
-        │       ├── paymenthoodhandler.php       # Core handler class (business logic)
-        │       └── templates/
-        │           └── manage-subscription.tpl  # Customer-facing subscription UI
-        │
-        └── gateways/
-            ├── paymenthood.php                  # Gateway configuration & entry point
-            ├── whmcs.json                       # Module metadata for Apps & Integrations
-            ├── paymenthood-logo.png             # Module logo
-            └── callback/
-                └── paymenthood.php              # Webhook & return URL handler
+    └── reports/
+        └── paymenthood_transactions.php                         # Transactions report module
 ```
 
 ### Component Details
