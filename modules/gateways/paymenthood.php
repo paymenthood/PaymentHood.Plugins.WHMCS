@@ -8,7 +8,16 @@ error_reporting(E_ALL);
 if (!defined("WHMCS"))
     die("This file cannot be accessed directly");
 
-require_once __DIR__ . '/../addons/paymenthood/paymenthoodhandler.php';
+$handlerPath = __DIR__ . '/../addons/paymenthood/paymenthoodhandler.php';
+if (!file_exists($handlerPath)) {
+    die('PaymentHood installation incomplete: Missing required file at modules/addons/paymenthood/paymenthoodhandler.php. Please ensure ALL plugin files and directories are uploaded to your WHMCS installation.');
+}
+require_once $handlerPath;
+
+// Verify the class was loaded successfully
+if (!class_exists('PaymentHoodHandler')) {
+    die('PaymentHood installation error: The file modules/addons/paymenthood/paymenthoodhandler.php exists but the PaymentHoodHandler class could not be loaded. The file may be corrupted or incomplete. Please re-upload the file ensuring it is transferred in binary mode (not ASCII mode in FTP) and verify the file size matches the original.');
+}
 
 // Load WHMCS functions if not already loaded
 if (!function_exists('addInvoiceRefund')) {

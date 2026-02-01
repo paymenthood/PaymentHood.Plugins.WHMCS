@@ -155,15 +155,23 @@ Smarty template for subscription management:
 
 ### Step 1: File Installation
 1. Download the plugin files
-2. Copy the full directory contents to your WHMCS installation root:
+2. **IMPORTANT**: Upload ALL directories and files to your WHMCS installation root while preserving the exact folder structure:
    ```
-   /path/to/whmcs/includes/hooks/
-   /path/to/whmcs/modules/addons/paymenthood/
+   /path/to/whmcs/includes/hooks/paymenthood-checkout-label-hook.php
+   /path/to/whmcs/includes/hooks/paymenthood-cron-hook.php
+   /path/to/whmcs/includes/hooks/paymenthood-payment-profiles-hook.php
+   /path/to/whmcs/modules/addons/paymenthood/paymenthoodhandler.php
+   /path/to/whmcs/modules/addons/paymenthood/templates/manage-subscription.tpl
    /path/to/whmcs/modules/gateways/paymenthood.php
-   /path/to/whmcs/modules/gateways/whmcs.json
-   /path/to/whmcs/modules/gateways/paymenthood-logo.png
    /path/to/whmcs/modules/gateways/callback/paymenthood.php
+   /path/to/whmcs/modules/gateways/paymenthood/get-payment-profiles.php
+   /path/to/whmcs/modules/gateways/paymenthood/icon-proxy.php
+   /path/to/whmcs/modules/gateways/paymenthood/paymenthood-logo.png
+   /path/to/whmcs/modules/gateways/paymenthood/whmcs.json
+   /path/to/whmcs/modules/reports/paymenthood_transactions.php
    ```
+3. Verify that the `modules/addons/paymenthood/` directory exists with the `paymenthoodhandler.php` file inside it
+4. Ensure all PHP files have proper read permissions (typically 644)
 
 ### Step 2: WHMCS Configuration
 1. Log in to WHMCS Admin Panel
