@@ -13,7 +13,7 @@ if (defined('WHMCS_MAIL') && WHMCS_MAIL) {
 class PaymentHoodHandler
 {
     const PAYMENTHOOD_GATEWAY = 'paymenthood';
-    
+
     private static function normalizeYesNoToBool($rawValue): bool
     {
         if (is_string($rawValue)) {
@@ -27,7 +27,7 @@ class PaymentHoodHandler
             // Any other non-empty string (including corrupted long strings) => treat as enabled
             return $normalized !== '';
         }
-        
+
         return !empty($rawValue);
     }
 
@@ -53,7 +53,7 @@ class PaymentHoodHandler
             return false;
         }
     }
-    
+
     /**
      * Returns true when sandbox mode is enabled (IsSandboxActivated).
      * - Prefers WHMCS gateway variables when available
@@ -77,7 +77,7 @@ class PaymentHoodHandler
                 require_once $functionsPath;
             }
         }
-        
+
         $rawSandboxValue = null;
 
         // Only call getGatewayVariables() when the gateway is activated.
@@ -86,24 +86,24 @@ class PaymentHoodHandler
             $gatewayVars = getGatewayVariables(self::PAYMENTHOOD_GATEWAY);
             $rawSandboxValue = $gatewayVars['IsSandboxActivated'] ?? null;
         }
-        
+
         if ($rawSandboxValue === null) {
             $rawSandboxValue = Capsule::table('tblpaymentgateways')
                 ->where('gateway', self::PAYMENTHOOD_GATEWAY)
                 ->whereRaw('LOWER(setting) = ?', ['issandboxactivated'])
                 ->value('value');
         }
-        
+
         if ($rawSandboxValue === null) {
             $rawSandboxValue = '';
         }
-        
+
         // If a long non-standard value is stored, try to decrypt it.
         if (is_string($rawSandboxValue)) {
             $trimmed = trim($rawSandboxValue);
             $normalized = strtolower($trimmed);
             $isStandard = in_array($normalized, ['on', '1', 'yes', 'true', '', '0', 'no', 'false'], true);
-            
+
             if (!$isStandard && $trimmed !== '' && strlen($trimmed) > 10 && function_exists('decrypt')) {
                 try {
                     $rawSandboxValue = (string) decrypt($trimmed);
@@ -114,7 +114,7 @@ class PaymentHoodHandler
                 $rawSandboxValue = $trimmed;
             }
         }
-        
+
         return self::normalizeYesNoToBool($rawSandboxValue);
     }
 
@@ -367,7 +367,7 @@ class PaymentHoodHandler
                 ]);
 
                 $callbackUrl = rtrim(self::getSystemUrl(), '/') . '/modules/gateways/callback/paymenthood.php?invoiceid=' . $invoiceId;
-                
+
                 $postData = [
                     'referenceId' => (string) $invoiceId,
                     'amount' => $amount,
@@ -978,14 +978,34 @@ HTML;
         return null;
     }
 
+    // public static function paymenthood_ConsoleUrl(): string
+    // {
+    //     return rtrim('https://console.paymenthood.com/', '/');
+    // }
+
+    // public static function paymenthood_getPaymentAppBaseUrl(): string
+    // {
+    //     return rtrim('https://appapi.paymenthood.com/api/', '/');
+    // }
+
+    // public static function paymenthood_grantAuthorizationUrl(): string
+    // {
+    //     return self::paymenthood_ConsoleUrl() . '/auth/signin';
+    // }
+
+    // public static function paymenthood_getPaymentBaseUrl(): string
+    // {
+    //     return rtrim('https://api.paymenthood.com/api/v1', '/');
+    // }
+
     public static function paymenthood_ConsoleUrl(): string
     {
-        return rtrim('https://console.paymenthood.com/', '/');
+        return rtrim('https://admin-stage.payment-controller.com/', '/');
     }
 
     public static function paymenthood_getPaymentAppBaseUrl(): string
     {
-        return rtrim('https://appapi.paymenthood.com/api/', '/');
+        return rtrim('https://ezpin-payment-app-service-stage-ckbcd9ekc7bzcjfx.westus-01.azurewebsites.net/api/', '/');
     }
 
     public static function paymenthood_grantAuthorizationUrl(): string
@@ -995,6 +1015,6 @@ HTML;
 
     public static function paymenthood_getPaymentBaseUrl(): string
     {
-        return rtrim('https://api.paymenthood.com/api/v1', '/');
+        return rtrim('https://api-stage.payment-controller.com/api/v1', '/');
     }
 }

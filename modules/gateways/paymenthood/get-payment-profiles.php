@@ -11,10 +11,15 @@
 
 ini_set('display_errors', 0);
 ini_set('display_startup_errors', 0);
-error_reporting(E_ALL);
+error_reporting(0);
 
 // Handle icon proxy mode (GET with ?proxy=1&u=...)
 if ($_SERVER['REQUEST_METHOD'] === 'GET' && !empty($_GET['proxy'])) {
+    // Ensure absolutely no output before headers
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    
     $url = isset($_GET['u']) ? (string) $_GET['u'] : '';
     $url = trim($url);
     
@@ -50,16 +55,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && !empty($_GET['proxy'])) {
     // Allowlist blob storage hosts
     $allowed = (
         $host === 'phpaymentstorageaccount.blob.core.windows.net'
-        || substr($host, -24) === '.blob.core.windows.net'
+        || substr($host, -22) === '.blob.core.windows.net'
         || $host === 'paymenthood.com'
         || substr($host, -15) === '.paymenthood.com'
         || substr($host, -13) === '.azureedge.net'
     );
     
     if (!$allowed) {
+        $hostSuffix = substr($host, -24);
+        error_log(sprintf(
+            'PaymentHood icon proxy blocked: host=%s, suffix=%s, match=%s',
+            $host,
+            $hostSuffix,
+            $hostSuffix === '.blob.core.windows.net' ? 'yes' : 'no'
+        ));
         http_response_code(403);
         header('Content-Type: text/plain');
-        echo 'Host not allowed';
+        echo 'Host not allowed: ' . $host;
         exit;
     }
     
@@ -70,6 +82,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && !empty($_GET['proxy'])) {
     curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
     curl_setopt($ch, CURLOPT_TIMEOUT, 10);
     curl_setopt($ch, CURLOPT_ENCODING, '');
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
     curl_setopt($ch, CURLOPT_HTTPHEADER, [
         'Accept: image/*',
         'User-Agent: WHMCS-PaymentHood-IconProxy/1.0',
@@ -78,12 +92,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && !empty($_GET['proxy'])) {
     $body = curl_exec($ch);
     $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $contentType = (string) curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
+    $error = curl_error($ch);
+    $errno = curl_errno($ch);
     curl_close($ch);
     
-    if ($body === false || $httpCode < 200 || $httpCode >= 300) {
+    // Log all proxy requests for debugging
+    error_log(sprintf(
+        'PaymentHood icon proxy: URL=%s, HTTP=%d, Type=%s, Size=%d, Error=%s',
+        $url,
+        $httpCode,
+        $contentType,
+        $body === false ? -1 : strlen($body),
+        $error ?: 'none'
+    ));
+    
+    if ($body === false || $httpCode < 200 || $httpCode >= 300 || strlen($body) === 0) {
         http_response_code(502);
         header('Content-Type: text/plain');
-        echo 'Upstream failed';
+        $msg = 'Upstream failed';
+        if ($error) {
+            $msg .= ': ' . $error . ' (errno: ' . $errno . ')';
+        } elseif ($httpCode > 0) {
+            $msg .= ' (HTTP ' . $httpCode . ')';
+        }
+        echo $msg;
         exit;
     }
     
@@ -101,8 +133,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && !empty($_GET['proxy'])) {
         }
     }
     
+    // Normalize SVG content type (preserve charset if present)
+    if (stripos($contentType, 'svg') !== false && stripos($contentType, 'image/') === false) {
+        $contentType = 'image/svg+xml' . (stripos($contentType, 'charset') !== false ? '; charset=utf-8' : '');
+    }
+    
+    // Clear any output buffers before sending image
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    
+    // Debug mode: return info instead of image
+    if (!empty($_GET['debug'])) {
+        header('Content-Type: application/json');
+        echo json_encode([
+            'url' => $url,
+            'httpCode' => $httpCode,
+            'contentType' => $contentType,
+            'bodyLength' => strlen($body),
+            'bodyPreview' => substr($body, 0, 200),
+            'bodyHash' => md5($body)
+        ], JSON_PRETTY_PRINT);
+        exit;
+    }
+    
     header('Content-Type: ' . $contentType);
+    header('Content-Length: ' . strlen($body));
     header('Cache-Control: public, max-age=86400');
+    header('X-Content-Type-Options: nosniff');
+    header('Access-Control-Allow-Origin: *');
     echo $body;
     exit;
 }
@@ -265,7 +324,7 @@ try {
         ]);
     }
 
-    $url = PaymentHoodHandler::paymenthood_getPaymentAppBaseUrl() . "/apps/{$appId}/payment-profiles";
+    $url = PaymentHoodHandler::paymenthood_getPaymentAppBaseUrl() . "/apps/{$appId}/payment-profiles/payment-checkout-methods";
 
     $ch = curl_init($url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -306,17 +365,62 @@ try {
         ]);
     }
 
-    $profiles = json_decode($response, true);
-    if (!is_array($profiles)) {
+    $checkoutMethods = json_decode($response, true);
+    if (!is_array($checkoutMethods)) {
         $paymenthoodRespond(502, [
             'success' => false,
             'error' => 'Invalid JSON from PaymentHood API'
         ]);
     }
 
-    $activeProfiles = array_filter($profiles, function ($profile) {
-        return isset($profile['isActive']) && $profile['isActive'] === true;
-    });
+    // Flatten the response based on checkoutMethod
+    $activeProfiles = [];
+    foreach ($checkoutMethods as $checkoutMethodGroup) {
+        $checkoutMethod = $checkoutMethodGroup['checkoutMethod'] ?? '';
+        
+        if ($checkoutMethod === 'CreditCard') {
+            // Extract card icons from paymentCheckoutMethodItems
+            $items = $checkoutMethodGroup['paymentCheckoutMethodItems'] ?? [];
+            $firstItem = !empty($items) ? $items[0] : [];
+            
+            // API returns iconUri1 and iconUri2 directly on the item
+            $iconUri1 = $firstItem['iconUri1'] ?? null;
+            $iconUri2 = $firstItem['iconUri2'] ?? null;
+            
+            $isSupportSubscription = $firstItem['isSupportSubscription'] ?? false;
+            $isSupportSinglePayment = $firstItem['isSupportSinglePayment'] ?? true;
+            
+            // Add credit card icon with light and dark mode support from API
+            $activeProfiles[] = [
+                'checkoutMethod' => 'CreditCard',
+                'paymentProfileId' => 'creditcard',
+                'paymentProfileName' => 'Card',
+                'currency' => null,
+                'isActive' => true,
+                'paymentProvider' => [
+                    'provider' => 'CreditCard',
+                    'iconUri1' => $iconUri1,
+                    'iconUri2' => $iconUri2,
+                ],
+                'isSupportSubscription' => $isSupportSubscription,
+                'isSupportSinglePayment' => $isSupportSinglePayment,
+            ];
+        } elseif ($checkoutMethod === 'ProviderHostedPage') {
+            // Loop through all paymentCheckoutMethodItems
+            $items = $checkoutMethodGroup['paymentCheckoutMethodItems'] ?? [];
+            foreach ($items as $item) {
+                $profile = $item['paymentProfile'] ?? null;
+                if ($profile && isset($profile['isActive']) && $profile['isActive'] === true) {
+                    // Add additional fields from the item
+                    $profile['isSupportSubscription'] = $item['isSupportSubscription'] ?? false;
+                    $profile['isSupportSinglePayment'] = $item['isSupportSinglePayment'] ?? true;
+                    $profile['paymentMethodAddMode'] = $item['paymentMethodAddMode'] ?? null;
+                    $profile['checkoutMethod'] = $checkoutMethod;
+                    $activeProfiles[] = $profile;
+                }
+            }
+        }
+    }
 
     $paymenthoodRespond(200, [
         'success' => true,

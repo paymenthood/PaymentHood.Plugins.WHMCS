@@ -335,6 +335,7 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
         var container = document.getElementById('paymenthood-profiles-container');
 
         console.log('PaymentHood: displayProfiles called with', profilesList);
+        console.log('PaymentHood: Full profiles data:', JSON.stringify(profilesList, null, 2));
 
         // Only show supported providers (must have provider name)
         var supportedProfiles = (profilesList || []).filter(function(p) {
@@ -354,10 +355,13 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
             var directIconUrl = normalizeUrl(getProviderIconUrl(profile));
             var proxyIconUrl = getProxiedIconUrl(directIconUrl);
             var providerName = (profile.paymentProvider && profile.paymentProvider.provider) ? profile.paymentProvider.provider : '';
+            var profileName = profile.paymentProfileName;
 
             console.log('PaymentHood: Rendering profile', {
                 provider: providerName,
-                iconUrl: proxyIconUrl,
+                profileName: profileName,
+                directIconUrl: directIconUrl,
+                proxyIconUrl: proxyIconUrl,
                 iconUri1: profile.paymentProvider ? profile.paymentProvider.iconUri1 : null,
                 iconUri2: profile.paymentProvider ? profile.paymentProvider.iconUri2 : null,
                 isDarkMode: isDarkMode()
@@ -369,13 +373,14 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
                 html += '<div class="paymenthood-profile-icon">'
                     + '<img data-ph-icon="1" src="' + escapeHtml(proxyIconUrl) + '"'
                     + ' data-direct-src="' + escapeHtml(directIconUrl) + '"'
-                    + ' alt="' + escapeHtml(providerName) + '" loading="eager">'
+                    + ' alt="' + escapeHtml(profileName) + '" loading="eager">'
                     + '</div>';
             } else {
                 console.warn('PaymentHood: No icon URL for provider:', providerName);
             }
             
-            html += '<div class="paymenthood-profile-type">' + providerName + '</div>';
+            html += '<div class="paymenthood-profile-name">' + escapeHtml(profileName) + '</div>';
+            html += '<div class="paymenthood-profile-type">' + escapeHtml(providerName) + '</div>';
             html += '</div>';
         });
 
