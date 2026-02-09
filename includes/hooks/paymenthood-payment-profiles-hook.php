@@ -14,6 +14,14 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
             return '';
         }
 
+        // Get gateway settings including checkout message
+        $gatewayParams = getGatewayVariables('paymenthood');
+        $checkoutMessage = $gatewayParams['checkoutMessage'] ?? '';
+        $checkoutMessage = trim($checkoutMessage);
+        
+        // Escape for JavaScript
+        $checkoutMessageJs = json_encode($checkoutMessage);
+
         // Get base URL for AJAX endpoint
         $systemUrl = rtrim(\WHMCS\Config\Setting::getValue('SystemURL'), '/');
         $ajaxUrl = $systemUrl . '/modules/gateways/paymenthood/get-payment-profiles.php';
@@ -21,6 +29,22 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
 
         return <<<HTML
 <style>
+.paymenthood-checkout-message {
+    margin-top: 15px;
+    padding: 12px 15px;
+    background: #e7f3ff;
+    border: 1px solid #b3d9ff;
+    border-radius: 4px;
+    color: #004085;
+    font-size: 14px;
+    line-height: 1.5;
+    display: none;
+}
+
+.paymenthood-checkout-message.active {
+    display: block;
+}
+
 .paymenthood-profiles-container {
     margin-top: 15px;
     padding: 15px;
@@ -112,6 +136,7 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
 <script>
 (function() {
     var profiles = [];
+    var checkoutMessage = {$checkoutMessageJs};
 
     function isDarkMode() {
         try {
@@ -214,6 +239,25 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
             return;
         }
 
+        // Create checkout message container if it doesn't exist and message is set
+        var messageContainer = document.getElementById('paymenthood-checkout-message');
+        if (!messageContainer && checkoutMessage) {
+            messageContainer = document.createElement('div');
+            messageContainer.id = 'paymenthood-checkout-message';
+            messageContainer.className = 'paymenthood-checkout-message';
+            messageContainer.innerHTML = checkoutMessage;
+            
+            // Find PaymentHood payment method container and append message
+            paymentInputs.forEach(function(input) {
+                if (input.value === 'paymenthood' || input.id.toLowerCase().includes('paymenthood')) {
+                    var parent = input.closest('.payment-method') || input.closest('.radio') || input.closest('label') || input.parentElement;
+                    if (parent && parent.parentElement) {
+                        parent.parentElement.insertBefore(messageContainer, parent.nextSibling);
+                    }
+                }
+            });
+        }
+
         // Create container for payment profiles if it doesn't exist
         var container = document.getElementById('paymenthood-profiles-container');
         if (!container) {
@@ -227,7 +271,10 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
                 if (input.value === 'paymenthood' || input.id.toLowerCase().includes('paymenthood')) {
                     var parent = input.closest('.payment-method') || input.closest('.radio') || input.closest('label') || input.parentElement;
                     if (parent && parent.parentElement) {
-                        parent.parentElement.insertBefore(container, parent.nextSibling);
+                        // Insert after message if it exists, otherwise after parent
+                        var messageEl = document.getElementById('paymenthood-checkout-message');
+                        var insertAfter = messageEl || parent;
+                        insertAfter.parentElement.insertBefore(container, insertAfter.nextSibling);
                     }
                 }
             });
@@ -249,12 +296,18 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
 
     function handlePaymentMethodChange(selectedMethod) {
         var container = document.getElementById('paymenthood-profiles-container');
+        var messageContainer = document.getElementById('paymenthood-checkout-message');
         
         if (!container) {
             return;
         }
 
         if (selectedMethod === 'paymenthood') {
+            // Show message if it exists
+            if (messageContainer) {
+                messageContainer.classList.add('active');
+            }
+            
             container.classList.add('active');
             
             // Load profiles if not already loaded
@@ -262,6 +315,11 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
                 loadPaymentProfiles();
             }
         } else {
+            // Hide message
+            if (messageContainer) {
+                messageContainer.classList.remove('active');
+            }
+            
             container.classList.remove('active');
         }
     }
@@ -373,13 +431,15 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
                 html += '<div class="paymenthood-profile-icon">'
                     + '<img data-ph-icon="1" src="' + escapeHtml(proxyIconUrl) + '"'
                     + ' data-direct-src="' + escapeHtml(directIconUrl) + '"'
-                    + ' alt="' + escapeHtml(profileName) + '" loading="eager">'
+                    + ' alt="' + escapeHtml(profileName || providerName) + '" loading="eager">'
                     + '</div>';
             } else {
                 console.warn('PaymentHood: No icon URL for provider:', providerName);
             }
             
-            html += '<div class="paymenthood-profile-name">' + escapeHtml(profileName) + '</div>';
+            if (profileName) {
+                html += '<div class="paymenthood-profile-name">' + escapeHtml(profileName) + '</div>';
+            }
             html += '<div class="paymenthood-profile-type">' + escapeHtml(providerName) + '</div>';
             html += '</div>';
         });

@@ -93,6 +93,15 @@ function paymenthood_config()
         ];
     }
 
+    // Add checkout message field
+    $config['checkoutMessage'] = [
+        'FriendlyName' => 'Checkout Message',
+        'Type' => 'textarea',
+        'Rows' => '3',
+        'Description' => 'Optional message to display to customers on the checkout page above payment methods. Supports HTML.',
+        'Default' => 'To proceed with your payment, please click "Complete Order".<br>You will then be redirected to PaymentHood, where you can choose your preferred payment method or gateway.',
+    ];
+
     return $config;
 }
 
