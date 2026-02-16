@@ -978,34 +978,14 @@ HTML;
         return null;
     }
 
-    // public static function paymenthood_ConsoleUrl(): string
-    // {
-    //     return rtrim('https://console.paymenthood.com/', '/');
-    // }
-
-    // public static function paymenthood_getPaymentAppBaseUrl(): string
-    // {
-    //     return rtrim('https://appapi.paymenthood.com/api/', '/');
-    // }
-
-    // public static function paymenthood_grantAuthorizationUrl(): string
-    // {
-    //     return self::paymenthood_ConsoleUrl() . '/auth/signin';
-    // }
-
-    // public static function paymenthood_getPaymentBaseUrl(): string
-    // {
-    //     return rtrim('https://api.paymenthood.com/api/v1', '/');
-    // }
-
     public static function paymenthood_ConsoleUrl(): string
     {
-        return rtrim('https://admin-stage.payment-controller.com/', '/');
+        return rtrim('https://console.paymenthood.com/', '/');
     }
 
     public static function paymenthood_getPaymentAppBaseUrl(): string
     {
-        return rtrim('https://ezpin-payment-app-service-stage-ckbcd9ekc7bzcjfx.westus-01.azurewebsites.net/api/', '/');
+        return rtrim('https://appapi.paymenthood.com/api/', '/');
     }
 
     public static function paymenthood_grantAuthorizationUrl(): string
@@ -1015,6 +995,6 @@ HTML;
 
     public static function paymenthood_getPaymentBaseUrl(): string
     {
-        return rtrim('https://api-stage.payment-controller.com/api/v1', '/');
+        return rtrim('https://api.paymenthood.com/api/v1', '/');
     }
 }
