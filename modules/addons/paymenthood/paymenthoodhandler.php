@@ -14,6 +14,274 @@ class PaymentHoodHandler
 {
     const PAYMENTHOOD_GATEWAY = 'paymenthood';
 
+    private static function toMoney($value): float
+    {
+        if ($value === null) {
+            return 0.0;
+        }
+        if (is_string($value)) {
+            $value = trim($value);
+        }
+        return (float) $value;
+    }
+
+    private static function getInvoiceCurrencyCode(int $invoiceId): ?string
+    {
+        if ($invoiceId <= 0) {
+            return null;
+        }
+
+        try {
+            $currencyCode = Capsule::table('tblinvoices as i')
+                ->join('tblcurrencies as c', 'c.id', '=', 'i.currency')
+                ->where('i.id', $invoiceId)
+                ->value('c.code');
+
+            $currencyCode = is_string($currencyCode) ? trim($currencyCode) : '';
+            return $currencyCode !== '' ? $currencyCode : null;
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    /**
+     * Build a best-effort PaymentHood customerOrder payload using WHMCS data.
+     * Skips fields when WHMCS doesn't have the data.
+     */
+    private static function buildCustomerOrderPayload(
+        int $clientId,
+        int $invoiceId,
+        ?string $currency,
+        $amount,
+        array $params = []
+    ): array {
+        $customerOrder = [];
+
+        $currency = is_string($currency) ? trim($currency) : '';
+        if ($currency === '' && $invoiceId > 0) {
+            $currency = self::getInvoiceCurrencyCode($invoiceId) ?? '';
+        }
+
+        // Customer info (prefer WHMCS gateway params; fall back to DB)
+        $client = $params['clientdetails'] ?? [];
+        if (!is_array($client) || empty($client)) {
+            try {
+                $row = Capsule::table('tblclients')->where('id', $clientId)->first();
+                if ($row) {
+                    $client = [
+                        'userid' => $row->id ?? $clientId,
+                        'firstname' => $row->firstname ?? null,
+                        'lastname' => $row->lastname ?? null,
+                        'email' => $row->email ?? null,
+                        'phonenumber' => $row->phonenumber ?? null,
+                        'address1' => $row->address1 ?? null,
+                        'address2' => $row->address2 ?? null,
+                        'postcode' => $row->postcode ?? null,
+                        'city' => $row->city ?? null,
+                        'state' => $row->state ?? null,
+                        'country' => $row->country ?? null,
+                        'datecreated' => $row->datecreated ?? null,
+                    ];
+                }
+            } catch (\Throwable $e) {
+                // ignore
+            }
+        }
+
+        $customer = [];
+        if ($clientId > 0) {
+            $customer['customerId'] = (string) $clientId;
+        }
+
+        $accountCreated = $client['datecreated'] ?? $client['dateCreated'] ?? null;
+        if (is_string($accountCreated) && trim($accountCreated) !== '') {
+            $customer['accountCreatedTime'] = trim($accountCreated);
+        }
+
+        $firstName = $client['firstname'] ?? $client['firstName'] ?? null;
+        $lastName = $client['lastname'] ?? $client['lastName'] ?? null;
+        if (is_string($firstName) && trim($firstName) !== '') {
+            $customer['firstName'] = trim($firstName);
+        }
+        if (is_string($lastName) && trim($lastName) !== '') {
+            $customer['lastName'] = trim($lastName);
+        }
+
+        $email = $client['email'] ?? null;
+        if (is_string($email) && trim($email) !== '') {
+            $customer['email'] = trim($email);
+        }
+
+        $phone = $client['phonenumber'] ?? $client['phoneNumber'] ?? null;
+        if (is_string($phone) && trim($phone) !== '') {
+            $customer['phoneNumber'] = trim($phone);
+        }
+
+        // Address
+        $address = [];
+        $a1 = $client['address1'] ?? $client['streetAddressLine1'] ?? null;
+        $a2 = $client['address2'] ?? $client['streetAddressLine2'] ?? null;
+        $zip = $client['postcode'] ?? $client['zipCode'] ?? null;
+        $city = $client['city'] ?? null;
+        $state = $client['state'] ?? null;
+        $countryCode = $client['country'] ?? $client['countryCode'] ?? null;
+
+        if (is_string($a1) && trim($a1) !== '') {
+            $address['streetAddressLine1'] = trim($a1);
+        }
+        if (is_string($a2) && trim($a2) !== '') {
+            $address['streetAddressLine2'] = trim($a2);
+        }
+        if (is_string($zip) && trim($zip) !== '') {
+            $address['zipCode'] = trim($zip);
+        }
+        if (is_string($city) && trim($city) !== '') {
+            $address['city'] = trim($city);
+        }
+        if (is_string($state) && trim($state) !== '') {
+            $address['state'] = trim($state);
+        }
+        if (is_string($countryCode) && trim($countryCode) !== '') {
+            $address['countryCode'] = trim($countryCode);
+            // WHMCS typically stores country as ISO2; if we don't know the name, keep it consistent
+            $address['country'] = trim($countryCode);
+        }
+
+        if (!empty($address)) {
+            $customer['address'] = $address;
+        }
+
+        if (!empty($customer)) {
+            $customerOrder['customer'] = $customer;
+        }
+
+        // Order identifiers/description
+        if ($invoiceId > 0) {
+            $customerOrder['customId'] = (string) $invoiceId;
+        }
+
+        // Amount breakdown + items (invoice-aware when possible)
+        $invoice = null;
+        if ($invoiceId > 0) {
+            try {
+                $invoice = Capsule::table('tblinvoices')->where('id', $invoiceId)->first();
+            } catch (\Throwable $e) {
+                $invoice = null;
+            }
+        }
+
+        $subtotal = $invoice ? self::toMoney($invoice->subtotal ?? 0) : 0.0;
+        $tax1 = $invoice ? self::toMoney($invoice->tax ?? 0) : 0.0;
+        $tax2 = $invoice ? self::toMoney($invoice->tax2 ?? 0) : 0.0;
+        $credit = $invoice ? self::toMoney($invoice->credit ?? 0) : 0.0;
+        $invoiceTotal = $invoice ? self::toMoney($invoice->total ?? 0) : 0.0;
+        $total = $invoiceTotal > 0 ? $invoiceTotal : self::toMoney($amount);
+        $totalTax = $tax1 + $tax2;
+
+        $expected = $subtotal + $totalTax;
+        $discount = 0.0;
+        if ($credit > 0) {
+            $discount = $credit;
+        } elseif ($expected > 0 && $total >= 0 && $expected > $total) {
+            $discount = $expected - $total;
+        }
+
+        $customerOrder['amount'] = [
+            'total' => $total,
+            'handling' => 0,
+            'insurance' => 0,
+            'discount' => $discount,
+            'shipping' => 0,
+            'shippingDiscount' => 0,
+            'totalTax' => $totalTax,
+        ];
+
+        // Build items from invoice items when available
+        $items = [];
+        if ($invoiceId > 0) {
+            try {
+                $invoiceItems = Capsule::table('tblinvoiceitems')
+                    ->where('invoiceid', $invoiceId)
+                    ->orderBy('id', 'asc')
+                    ->get();
+                $runningAllocated = 0.0;
+
+                foreach ($invoiceItems as $idx => $ii) {
+                    $desc = is_string($ii->description ?? null) ? trim((string) $ii->description) : '';
+                    $lineAmount = self::toMoney($ii->amount ?? 0);
+                    $type = is_string($ii->type ?? null) ? trim((string) $ii->type) : '';
+                    $relid = (int) ($ii->relid ?? 0);
+
+                    if ($desc === '' && $lineAmount == 0.0) {
+                        continue;
+                    }
+
+                    $item = [
+                        'name' => ($desc !== '' ? $desc : ($type !== '' ? $type : 'Item')),
+                        'description' => '',
+                        'currency' => ($currency !== '' ? $currency : null),
+                        'amount' => $lineAmount,
+                        'quantity' => 1,
+                        'tax' => 0,
+                        'sku' => ($type !== '' && $relid > 0) ? ($type . ':' . $relid) : '',
+                    ];
+
+                    // Category (best-effort)
+                    $category = null;
+                    $typeLower = strtolower($type);
+                    if ($typeLower === 'domain' || $typeLower === 'hosting' || $typeLower === 'addon' || $typeLower === 'upgrade') {
+                        $category = 'DigitalGoods';
+                    } elseif ($typeLower === 'addfunds') {
+                        $category = 'Service';
+                    }
+                    if ($category !== null) {
+                        $item['category'] = $category;
+                    }
+
+                    // Remove null currency key if unknown
+                    if ($item['currency'] === null) {
+                        unset($item['currency']);
+                    }
+
+                    // Allocate tax proportionally when possible
+                    $isTaxed = (string) ($ii->taxed ?? '') === '1';
+                    if ($isTaxed && $subtotal > 0 && $totalTax > 0 && $lineAmount > 0) {
+                        $allocated = round(($lineAmount / $subtotal) * $totalTax, 2);
+                        $runningAllocated += $allocated;
+                        $item['tax'] = $allocated;
+                    }
+
+                    $items[] = $item;
+                }
+
+                // Fix rounding remainder by adjusting last taxed item
+                if ($totalTax > 0 && !empty($items)) {
+                    $remainder = round($totalTax - $runningAllocated, 2);
+                    if (abs($remainder) >= 0.01) {
+                        for ($j = count($items) - 1; $j >= 0; $j--) {
+                            if (!empty($items[$j]['tax'])) {
+                                $items[$j]['tax'] = round(((float) $items[$j]['tax']) + $remainder, 2);
+                                break;
+                            }
+                        }
+                    }
+                }
+            } catch (\Throwable $e) {
+                // ignore invoice items
+            }
+        }
+
+        if (!empty($items)) {
+            $customerOrder['items'] = $items;
+            // Description as first item name (best-effort)
+            if (!isset($customerOrder['description']) && isset($items[0]['name'])) {
+                $customerOrder['description'] = (string) $items[0]['name'];
+            }
+        }
+
+        return $customerOrder;
+    }
+
     private static function normalizeYesNoToBool($rawValue): bool
     {
         if (is_string($rawValue)) {
@@ -368,18 +636,15 @@ class PaymentHoodHandler
 
                 $callbackUrl = rtrim(self::getSystemUrl(), '/') . '/modules/gateways/callback/paymenthood.php?invoiceid=' . $invoiceId;
 
+                $customerOrder = self::buildCustomerOrderPayload($clientId, $invoiceId, (string) $currency, $amount, $params);
+
                 $postData = [
                     'referenceId' => (string) $invoiceId,
                     'amount' => $amount,
                     'currency' => $currency,
                     'autoCapture' => true,
                     'webhookUrl' => $callbackUrl,
-                    'customerOrder' => [
-                        'customer' => [
-                            'customerId' => (string) $clientId,
-                            'email' => $clientEmail,
-                        ],
-                    ],
+                    'customerOrder' => $customerOrder,
                     'returnUrl' => $callbackUrl,
                     'showPayRecurringInCheckout' => $hasRecurringItem,
                 ];
@@ -708,20 +973,26 @@ HTML;
             $appId = $credentials['appId'];
             $token = $credentials['token'];
 
+            $invoiceIdInt = (int) $invoiceId;
+            $currency = self::getInvoiceCurrencyCode($invoiceIdInt);
+            $customerOrder = self::buildCustomerOrderPayload((int) $clientId, $invoiceIdInt, $currency, $amount, []);
+
             self::safeLogModuleCall('createAutoPayment', ['appId' => $appId]);
             $callbackUrl = rtrim(self::getSystemUrl(), '/') . '/modules/gateways/callback/paymenthood.php?invoiceid=' . $invoiceId;
 
             $postData = [
                 "referenceId" => $invoiceId,
                 "amount" => $amount,
+                "currency" => $currency,
                 "autoCapture" => true,
                 "webhookUrl" => $callbackUrl,
-                "customerOrder" => [
-                    "customer" => [
-                        "customerId" => $clientId,
-                    ]
-                ]
+                "customerOrder" => $customerOrder,
             ];
+
+            // Remove currency if unknown (avoid sending null/empty to API)
+            if (empty($postData['currency'])) {
+                unset($postData['currency']);
+            }
 
             $response = self::callApi(self::paymenthood_getPaymentBaseUrl() . "/apps/{$appId}/payments/auto-payment", $postData, $token);
             self::safeLogModuleCall('createAutoPayment - result', $response);
