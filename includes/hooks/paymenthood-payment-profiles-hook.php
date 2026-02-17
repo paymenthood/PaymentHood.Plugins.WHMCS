@@ -4,10 +4,18 @@
  * Displays available payment profiles when PaymentHood gateway is selected
  */
 
+use WHMCS\Database\Capsule;
+
 require_once __DIR__ . '/../../modules/addons/paymenthood/paymenthoodhandler.php';
+
+if (!defined('paymenthood_GATEWAY')) {
+    define('paymenthood_GATEWAY', 'paymenthood');
+}
 
 add_hook('ClientAreaHeadOutput', 1, function($vars) {
     try {
+        $gateway = paymenthood_GATEWAY;
+
         // Only load on checkout page
         $filename = $_SERVER['PHP_SELF'] ?? '';
         if (strpos($filename, 'cart.php') === false && strpos($filename, 'checkout') === false) {
@@ -15,17 +23,145 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
         }
 
         // Get gateway settings including checkout message
-        $gatewayParams = getGatewayVariables('paymenthood');
-        $checkoutMessage = $gatewayParams['checkoutMessage'] ?? '';
-        $checkoutMessage = trim($checkoutMessage);
+        // WHMCS may normalize gateway setting keys to lowercase in some contexts/versions.
+        if (!function_exists('getGatewayVariables') && defined('ROOTDIR')) {
+            $gatewayFunctionsPath = ROOTDIR . '/includes/gatewayfunctions.php';
+            if (is_file($gatewayFunctionsPath)) {
+                require_once $gatewayFunctionsPath;
+            }
+        }
+
+        $hasGetGatewayVariables = function_exists('getGatewayVariables');
+        $gatewayParams = $hasGetGatewayVariables ? (array) getGatewayVariables($gateway) : [];
+        $checkoutMessageSource = 'empty';
+
+        if (isset($gatewayParams['checkoutMessage'])) {
+            $checkoutMessage = $gatewayParams['checkoutMessage'];
+            $checkoutMessageSource = 'gatewayVars.checkoutMessage';
+        } elseif (isset($gatewayParams['checkoutmessage'])) {
+            $checkoutMessage = $gatewayParams['checkoutmessage'];
+            $checkoutMessageSource = 'gatewayVars.checkoutmessage';
+        } else {
+            $checkoutMessage = '';
+        }
+
+        // Fallback to direct DB read (case-insensitive) if gateway variables didn't return it
+        if (trim((string) $checkoutMessage) === '') {
+            try {
+                // Pick the most recent non-empty value (handles duplicated settings rows)
+                $checkoutMessage = Capsule::table('tblpaymentgateways')
+                    ->whereRaw('TRIM(LOWER(gateway)) = ?', [strtolower($gateway)])
+                    ->whereRaw('LOWER(setting) = ?', ['checkoutmessage'])
+                    ->whereRaw("TRIM(COALESCE(value,'')) <> ''")
+                    ->orderByDesc('id')
+                    ->value('value');
+
+                if (trim((string) $checkoutMessage) !== '') {
+                    $checkoutMessageSource = 'db.checkoutmessage.latestNonEmpty';
+                } else {
+                    // Fallback: in case the value is intentionally empty but present
+                    $checkoutMessage = Capsule::table('tblpaymentgateways')
+                        ->whereRaw('TRIM(LOWER(gateway)) = ?', [strtolower($gateway)])
+                        ->whereRaw('LOWER(setting) = ?', ['checkoutmessage'])
+                        ->orderByDesc('id')
+                        ->value('value');
+                    if ($checkoutMessage !== null) {
+                        $checkoutMessageSource = 'db.checkoutmessage.latest';
+                    }
+                }
+            } catch (\Throwable $e) {
+                $checkoutMessage = '';
+            }
+        }
+
+        $checkoutMessage = trim((string) $checkoutMessage);
+
+        // WHMCS does not always persist gateway config defaults into tblpaymentgateways
+        // until an admin saves the gateway settings. Fall back to the gateway module's
+        // own declared Default value so it remains configurable in code.
+        if ($checkoutMessage === '') {
+            try {
+                if (defined('ROOTDIR')) {
+                    $gatewayModulePath = ROOTDIR . '/modules/gateways/' . $gateway . '.php';
+                    if (is_file($gatewayModulePath)) {
+                        require_once $gatewayModulePath;
+                    }
+                }
+
+                $configFn = $gateway . '_config';
+                if (function_exists($configFn)) {
+                    $cfg = (array) $configFn();
+                    $default = $cfg['checkoutMessage']['Default'] ?? '';
+                    $default = is_string($default) ? trim($default) : '';
+                    if ($default !== '') {
+                        $checkoutMessage = $default;
+                        $checkoutMessageSource = 'fallback.gatewayConfigDefault';
+                    }
+                }
+            } catch (\Throwable $e) {
+                // ignore
+            }
+        }
+
+        // Minimal debug to help diagnose missing message without logging the content
+        $debug = [
+            'source' => $checkoutMessageSource,
+            'length' => strlen($checkoutMessage),
+            'isEmpty' => ($checkoutMessage === ''),
+            'hasGetGatewayVariables' => $hasGetGatewayVariables,
+            'gatewayVarKeys' => array_values(array_unique(array_map('strval', array_keys($gatewayParams)))),
+        ];
+
+        // Only log when we're missing the stored value (or falling back), to reduce noise.
+        $shouldLog = ($checkoutMessageSource === 'fallback.configDefault' || $checkoutMessageSource === 'empty');
+
+        // If still empty, log what settings exist for this gateway (names + ids only)
+        if ($shouldLog && $checkoutMessage === '') {
+            try {
+                $rows = Capsule::table('tblpaymentgateways')
+                    ->select(['id', 'gateway', 'setting', 'value'])
+                    ->whereRaw('TRIM(LOWER(gateway)) = ?', [strtolower($gateway)])
+                    ->orderBy('id', 'asc')
+                    ->get();
+
+                $sensitive = function($settingName) {
+                    $s = strtolower((string) $settingName);
+                    return (strpos($s, 'token') !== false)
+                        || (strpos($s, 'secret') !== false)
+                        || (strpos($s, 'password') !== false)
+                        || (strpos($s, 'key') !== false)
+                        || (strpos($s, 'authorization') !== false);
+                };
+
+                $settingsSummary = [];
+                foreach ($rows as $r) {
+                    $isSensitive = $sensitive($r->setting ?? '');
+                    $settingsSummary[] = [
+                        'id' => (int) ($r->id ?? 0),
+                        'setting' => (string) ($r->setting ?? ''),
+                        'len' => $isSensitive ? null : strlen((string) ($r->value ?? '')),
+                        'redacted' => $isSensitive,
+                    ];
+                }
+
+                $debug['dbRowCount'] = count($settingsSummary);
+                $debug['dbSettings'] = $settingsSummary;
+            } catch (\Throwable $e) {
+                $debug['dbInspectError'] = $e->getMessage();
+            }
+        }
+
+        if ($shouldLog) {
+            PaymentHoodHandler::safeLogModuleCall('checkout_message_resolve', [], $debug);
+        }
         
         // Escape for JavaScript
         $checkoutMessageJs = json_encode($checkoutMessage);
 
         // Get base URL for AJAX endpoint
         $systemUrl = rtrim(\WHMCS\Config\Setting::getValue('SystemURL'), '/');
-        $ajaxUrl = $systemUrl . '/modules/gateways/paymenthood/get-payment-profiles.php';
-        $iconProxyBase = $systemUrl . '/modules/gateways/paymenthood/get-payment-profiles.php?proxy=1&u=';
+        $ajaxUrl = $systemUrl . '/modules/gateways/' . rawurlencode($gateway) . '/get-payment-profiles.php';
+        $iconProxyBase = $systemUrl . '/modules/gateways/' . rawurlencode($gateway) . '/get-payment-profiles.php?proxy=1&u=';
 
         return <<<HTML
 <style>
@@ -138,6 +274,34 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
     var profiles = [];
     var checkoutMessage = {$checkoutMessageJs};
 
+    function toArray(nodeList) {
+        try {
+            return Array.prototype.slice.call(nodeList || []);
+        } catch (e) {
+            return [];
+        }
+    }
+
+    function getSelectedPaymentMethod() {
+        var select = document.querySelector('select[name="paymentmethod"], select#paymentmethod');
+        if (select && select.value) {
+            return select.value;
+        }
+        var checked = document.querySelector('input[name="paymentmethod"]:checked');
+        if (checked && checked.value) {
+            return checked.value;
+        }
+        var hidden = document.querySelector('input[name="paymentmethod"][type="hidden"]');
+        if (hidden && hidden.value) {
+            return hidden.value;
+        }
+        return '';
+    }
+
+    function isPaymentHoodMethod(value) {
+        return String(value || '').toLowerCase().indexOf('paymenthood') !== -1;
+    }
+
     function isDarkMode() {
         try {
             return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -226,17 +390,33 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
     }
 
     function initPaymentHoodProfiles() {
-        // Find all payment method inputs (radio buttons or similar)
-        var paymentInputs = document.querySelectorAll('input[name="paymentmethod"]');
-        
-        if (paymentInputs.length === 0) {
+        // Find all payment method inputs (radio buttons or select dropdowns)
+        var paymentInputs = document.querySelectorAll('input[name="paymentmethod"], select[name="paymentmethod"], select#paymentmethod');
+        var paymentInputsArr = toArray(paymentInputs);
+
+        if (paymentInputsArr.length === 0) {
             // Try alternative selectors
-            paymentInputs = document.querySelectorAll('.payment-methods input[type="radio"]');
+            paymentInputsArr = toArray(document.querySelectorAll('.payment-methods input[type="radio"], .payment-methods select'));
         }
 
-        if (paymentInputs.length === 0) {
-            console.log('PaymentHood: No payment method inputs found');
+        if (paymentInputsArr.length === 0) {
+            // Might be rendered dynamically; we re-run later.
             return;
+        }
+
+        // Find an anchor near the PaymentHood option (for insertion)
+        function findPaymenthoodAnchor() {
+            for (var i = 0; i < paymentInputsArr.length; i++) {
+                var el = paymentInputsArr[i];
+                var id = (el && el.id) ? String(el.id).toLowerCase() : '';
+                var val = (el && el.value) ? String(el.value) : '';
+                if (isPaymentHoodMethod(val) || id.indexOf('paymenthood') !== -1) {
+                    return el;
+                }
+            }
+            // If only a select exists, anchor to it
+            var select = document.querySelector('select[name="paymentmethod"], select#paymentmethod');
+            return select || paymentInputsArr[0] || null;
         }
 
         // Create checkout message container if it doesn't exist and message is set
@@ -248,14 +428,14 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
             messageContainer.innerHTML = checkoutMessage;
             
             // Find PaymentHood payment method container and append message
-            paymentInputs.forEach(function(input) {
-                if (input.value === 'paymenthood' || input.id.toLowerCase().includes('paymenthood')) {
-                    var parent = input.closest('.payment-method') || input.closest('.radio') || input.closest('label') || input.parentElement;
-                    if (parent && parent.parentElement) {
-                        parent.parentElement.insertBefore(messageContainer, parent.nextSibling);
-                    }
+            var anchor = findPaymenthoodAnchor();
+            if (anchor) {
+                var parent = anchor.closest ? (anchor.closest('.payment-method') || anchor.closest('.radio') || anchor.closest('label')) : null;
+                parent = parent || anchor.parentElement;
+                if (parent && parent.parentElement) {
+                    parent.parentElement.insertBefore(messageContainer, parent.nextSibling);
                 }
-            });
+            }
         }
 
         // Create container for payment profiles if it doesn't exist
@@ -267,30 +447,34 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
             container.innerHTML = '<div class="paymenthood-profiles-loading">Loading payment methods...</div>';
             
             // Find PaymentHood payment method container and append
-            paymentInputs.forEach(function(input) {
-                if (input.value === 'paymenthood' || input.id.toLowerCase().includes('paymenthood')) {
-                    var parent = input.closest('.payment-method') || input.closest('.radio') || input.closest('label') || input.parentElement;
-                    if (parent && parent.parentElement) {
-                        // Insert after message if it exists, otherwise after parent
-                        var messageEl = document.getElementById('paymenthood-checkout-message');
-                        var insertAfter = messageEl || parent;
-                        insertAfter.parentElement.insertBefore(container, insertAfter.nextSibling);
-                    }
+            var anchor = findPaymenthoodAnchor();
+            if (anchor) {
+                var parent = anchor.closest ? (anchor.closest('.payment-method') || anchor.closest('.radio') || anchor.closest('label')) : null;
+                parent = parent || anchor.parentElement;
+                if (parent && parent.parentElement) {
+                    // Insert after message if it exists, otherwise after parent
+                    var messageEl = document.getElementById('paymenthood-checkout-message');
+                    var insertAfter = messageEl || parent;
+                    insertAfter.parentElement.insertBefore(container, insertAfter.nextSibling);
                 }
-            });
+            }
         }
 
         // Add change event listeners
-        paymentInputs.forEach(function(input) {
+        paymentInputsArr.forEach(function(input) {
+            if (!input || input.__phBoundChange) {
+                return;
+            }
+            input.__phBoundChange = true;
             input.addEventListener('change', function() {
                 handlePaymentMethodChange(this.value);
             });
         });
 
         // Check if PaymentHood is already selected
-        var selectedInput = document.querySelector('input[name="paymentmethod"]:checked');
-        if (selectedInput && selectedInput.value === 'paymenthood') {
-            handlePaymentMethodChange('paymenthood');
+        var selected = getSelectedPaymentMethod();
+        if (selected) {
+            handlePaymentMethodChange(selected);
         }
     }
 
@@ -302,7 +486,7 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
             return;
         }
 
-        if (selectedMethod === 'paymenthood') {
+        if (isPaymentHoodMethod(selectedMethod)) {
             // Show message if it exists
             if (messageContainer) {
                 messageContainer.classList.add('active');
@@ -483,6 +667,25 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
 
     // Also try after a short delay to handle dynamic content
     setTimeout(initPaymentHoodProfiles, 500);
+
+    // Watch for checkout templates that render payment methods late/re-render sections
+    try {
+        if (window.MutationObserver && document.body) {
+            var phInitTimer = null;
+            var scheduleInit = function() {
+                if (phInitTimer) {
+                    clearTimeout(phInitTimer);
+                }
+                phInitTimer = setTimeout(initPaymentHoodProfiles, 100);
+            };
+            var mo = new MutationObserver(function() {
+                scheduleInit();
+            });
+            mo.observe(document.body, { childList: true, subtree: true });
+        }
+    } catch (e) {
+        // no-op
+    }
 })();
 </script>
 HTML;

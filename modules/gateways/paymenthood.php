@@ -27,7 +27,9 @@ if (!function_exists('localAPI')) {
     require_once ROOTDIR . '/includes/functions.php';
 }
 
-define('paymenthood_GATEWAY', 'paymenthood');
+if (!defined('paymenthood_GATEWAY')) {
+    define('paymenthood_GATEWAY', 'paymenthood');
+}
 
 // Handle activation return before any output
 paymenthood_handleActivationReturn();
