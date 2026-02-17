@@ -60,6 +60,10 @@ try {
     $query = \WHMCS\Database\Capsule::table('tblorders as o')
         ->leftJoin('tblclients as c', 'o.userid', '=', 'c.id')
         ->leftJoin('tblinvoices as i', 'o.invoiceid', '=', 'i.id')
+        ->leftJoin('tblaccounts as a', function ($join) {
+            $join->on('a.invoiceid', '=', 'i.id')
+                ->where('a.gateway', '=', 'paymenthood');
+        })
         ->where('o.paymentmethod', 'paymenthood')
         ->select([
             'o.id as order_id',
@@ -70,6 +74,7 @@ try {
             'c.firstname',
             'c.lastname',
             'c.companyname',
+            'a.fees as transaction_fee',
         ])
         ->orderBy('o.id', 'desc');
 
@@ -107,7 +112,7 @@ try {
         logActivity('PaymentHood report: rows=' . $rows->count());
     }
 
-    $reportdata['tableheadings'] = ['Order ID', 'Invoice ID', 'Client', 'Payment Method', 'Provider', 'Amount', 'Details'];
+    $reportdata['tableheadings'] = ['Order ID', 'Invoice ID', 'Client', 'Payment Method', 'Provider', 'Amount', 'Fee', 'Details'];
     $reportdata['tablevalues'] = [];
     $reportdata['tablesort'] = true;
 
@@ -123,6 +128,8 @@ try {
         }
 
         $provider = isset($row->provider) && $row->provider !== '' ? (string) $row->provider : '-';
+        
+        $fee = isset($row->transaction_fee) && $row->transaction_fee > 0 ? '$' . number_format((float) $row->transaction_fee, 2) : '-';
 
         $detailsCell = '-';
         $paymenthoodAppId = isset($row->paymenthood_app_id) ? trim((string) $row->paymenthood_app_id) : '';
@@ -147,6 +154,7 @@ try {
             'PaymentHood',
             htmlspecialchars($provider),
             '$' . number_format((float) $row->amount, 2),
+            $fee,
             $detailsCell,
         ];
     }

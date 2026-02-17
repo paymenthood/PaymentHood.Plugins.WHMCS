@@ -148,6 +148,18 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
     $paymentState = $data['paymentState'] ?? 'unknown';
     $transactionId = $data['paymentId'] ?? 'N/A'; // fallback
 
+    // Extract fee from feeBreakdown (appFee + providerFee)
+    $totalFee = PaymentHoodHandler::extractTotalFee($data);
+
+    PaymentHoodHandler::safeLogModuleCall('callback_fee_extracted', [
+        'invoiceId' => $invoiceId,
+        'transactionId' => $transactionId,
+    ], [
+        'appFee' => $data['feeBreakdown']['appFee'] ?? null,
+        'providerFee' => $data['feeBreakdown']['providerFee'] ?? null,
+        'totalFee' => $totalFee,
+    ]);
+
     // Extract and store provider name if available
     $providerName = null;
     if (isset($data['payInfo']['paymentProfile']['paymentProvider']['provider'])) {
@@ -243,17 +255,46 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
     // decide for invoice based on payment provider state
     if ($paymentState === 'Captured') {
         // Payment Success
+        PaymentHoodHandler::safeLogModuleCall('callback_captured_state_entered', [
+            'invoiceId' => $invoiceId,
+            'transactionId' => $transactionId,
+        ], [
+            'totalFee' => $totalFee,
+            'paymentAmount' => $data['amount'] ?? null,
+        ]);
+
         try {
             // check invoise status
             $invoiceData = localAPI('GetInvoice', ['invoiceid' => $invoiceId]);
+            
+            PaymentHoodHandler::safeLogModuleCall('callback_invoice_status_check', [
+                'invoiceId' => $invoiceId,
+            ], [
+                'invoiceStatus' => $invoiceData['status'] ?? 'unknown',
+                'invoiceTotal' => $invoiceData['total'] ?? null,
+            ]);
+
             if ($invoiceData['status'] === 'Paid') {
                 PaymentHoodHandler::safeLogModuleCall('callback_payment_already_recorded', [
                     'invoiceId' => $invoiceId,
                     'transactionId' => $transactionId
-                ], []);
+                ], [
+                    'totalFee' => $totalFee,
+                    'feeWillNotBeAdded' => 'Invoice already paid',
+                ]);
             } else {
-                // Record payment
-                addInvoicePayment($invoiceId, $transactionId, $data['amount'], 0, PAYMENTHOOD_GATEWAY);
+                // Record payment with fee tracked in tblaccounts.fees
+                addInvoicePayment($invoiceId, $transactionId, $data['amount'], $totalFee, PAYMENTHOOD_GATEWAY);
+
+                PaymentHoodHandler::safeLogModuleCall('callback_payment_recorded', [
+                    'invoiceId' => $invoiceId,
+                    'transactionId' => $transactionId,
+                    'amount' => $data['amount'],
+                ], [
+                    'fee' => $totalFee,
+                    'gateway' => PAYMENTHOOD_GATEWAY,
+                    'feeRecordedInAccounts' => true,
+                ]);
             }
         } catch (Exception $e) {
             PaymentHoodHandler::safeLogModuleCall('callback_payment_record_error', [

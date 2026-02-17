@@ -25,6 +25,33 @@ class PaymentHoodHandler
         return (float) $value;
     }
 
+    /**
+     * Extract total fee (appFee + providerFee) from PaymentHood feeBreakdown.
+     * Treats null/missing values as 0. Returns 0.0 if feeBreakdown is absent.
+     *
+     * @param array|null $paymentData Full payment response from PaymentHood API
+     * @return float Total fee (appFee + providerFee)
+     */
+    public static function extractTotalFee($paymentData): float
+    {
+        if (!is_array($paymentData)) {
+            return 0.0;
+        }
+
+        $feeBreakdown = $paymentData['feeBreakdown'] ?? null;
+        if (!is_array($feeBreakdown)) {
+            return 0.0;
+        }
+
+        $appFee = self::toMoney($feeBreakdown['appFee'] ?? null);
+        $providerFee = self::toMoney($feeBreakdown['providerFee'] ?? null);
+
+        $totalFee = $appFee + $providerFee;
+
+        // Sanity: fee should not be negative
+        return $totalFee >= 0 ? round($totalFee, 2) : 0.0;
+    }
+
     private static function getInvoiceCurrencyCode(int $invoiceId): ?string
     {
         if ($invoiceId <= 0) {
