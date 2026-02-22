@@ -222,10 +222,10 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
     background: white;
     border: 2px solid #e0e0e0;
     border-radius: 4px;
-    cursor: pointer;
-    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    cursor: default;
     text-align: center;
     user-select: none;
+    pointer-events: none;
 }
 
 .paymenthood-profile-header {
@@ -233,17 +233,6 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
     align-items: center;
     justify-content: center;
     gap: 8px;
-}
-
-.paymenthood-profile-item:hover {
-    border-color: #80bdff;
-    box-shadow: 0 0 0 3px rgba(0,123,255,0.1);
-}
-
-.paymenthood-profile-item.selected {
-    border-color: #007bff;
-    box-shadow: 0 0 0 3px rgba(0,123,255,0.2);
-    background: #f0f7ff;
 }
 
 .paymenthood-profile-icon {
@@ -293,6 +282,19 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
     border-radius: 4px;
     color: #856404;
     text-align: center;
+}
+
+/*
+ * Prevent flicker: when PaymentHood is selected we immediately hide all other
+ * gateway content inside WHMCS's shared creditCardInputFields container.
+ */
+#creditCardInputFields.paymenthood-active > * {
+    display: none !important;
+}
+#creditCardInputFields.paymenthood-active > #paymenthood-checkout-message,
+#creditCardInputFields.paymenthood-active > #paymenthood-checkout-separator,
+#creditCardInputFields.paymenthood-active > #paymenthood-profiles-container {
+    display: block !important;
 }
 </style>
 
@@ -353,6 +355,110 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
 
     function isPaymentHoodMethod(value) {
         return String(value || '').toLowerCase().indexOf('paymenthood') !== -1;
+    }
+
+    function setPaymentHoodActive(active) {
+        var ccContainer = document.getElementById('creditCardInputFields');
+        if (!ccContainer) {
+            return;
+        }
+        if (active) {
+            ccContainer.classList.add('paymenthood-active');
+        } else {
+            ccContainer.classList.remove('paymenthood-active');
+        }
+    }
+
+    function getEffectiveSelectedGateway() {
+        // During WHMCS gateway switching there can be a brief moment where
+        // no radio is checked (returns ''). Treat that as "unknown" and
+        // fall back to the last known gateway to avoid flicker.
+        var current = '';
+        try {
+            current = getSelectedPaymentMethod();
+        } catch (e) {
+            current = '';
+        }
+        if (current) {
+            return current;
+        }
+        if (typeof window !== 'undefined' && window.__phLastGateway) {
+            return String(window.__phLastGateway || '');
+        }
+        return '';
+    }
+
+    function ensureCreditCardContainerVisibleIfPaymenthood() {
+        if (isInvoicePage()) {
+            return;
+        }
+
+        var gateway = getEffectiveSelectedGateway();
+        if (!isPaymentHoodMethod(gateway)) {
+            return;
+        }
+
+        var ccContainer = document.getElementById('creditCardInputFields');
+        if (!ccContainer) {
+            return;
+        }
+
+        var changed = false;
+
+        // Apply active class early (only if needed)
+        if (!ccContainer.classList.contains('paymenthood-active')) {
+            ccContainer.classList.add('paymenthood-active');
+            changed = true;
+        }
+
+        if (ccContainer.classList.contains('w-hidden')) {
+            ccContainer.classList.remove('w-hidden');
+            changed = true;
+        }
+        if (ccContainer.hasAttribute('hidden')) {
+            ccContainer.removeAttribute('hidden');
+            changed = true;
+        }
+
+        var display = '';
+        try {
+            display = window.getComputedStyle(ccContainer).display;
+        } catch (e) {
+            display = ccContainer.style.display;
+        }
+        if (display === 'none') {
+            ccContainer.style.display = 'block';
+            changed = true;
+        }
+
+        return changed;
+    }
+
+    function scheduleEnsureCreditCardContainerVisibleIfPaymenthood() {
+        if (typeof window === 'undefined') {
+            return;
+        }
+
+        // Debounce to next tick to avoid MutationObserver feedback loops
+        if (window.__phEnsureCcScheduled) {
+            return;
+        }
+        window.__phEnsureCcScheduled = true;
+
+        setTimeout(function() {
+            window.__phEnsureCcScheduled = false;
+            if (window.__phEnsuringCcVisible) {
+                return;
+            }
+            window.__phEnsuringCcVisible = true;
+            try {
+                ensureCreditCardContainerVisibleIfPaymenthood();
+            } catch (e) {
+                // no-op
+            } finally {
+                window.__phEnsuringCcVisible = false;
+            }
+        }, 0);
     }
 
     function isDarkMode() {
@@ -529,7 +635,9 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
             // Prefer the last known gateway from onGatewayChange, if available
             var lastKnown = (typeof window !== 'undefined') ? window.__phLastGateway : null;
             var effective = lastKnown || currentSelected;
-            if (effective && !isPaymentHoodMethod(effective)) {
+            // Treat empty/unknown as "not PaymentHood" — only show when we can
+            // positively confirm PaymentHood is the selected gateway.
+            if (!isPaymentHoodMethod(effective)) {
                 return;
             }
         }
@@ -589,27 +697,16 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
             sep.style.display = 'block';
         }
         
-        // Also show the shared creditCardInputFields container
+        // Also show the shared creditCardInputFields container.
+        // CSS rule #creditCardInputFields.paymenthood-active > * handles hiding
+        // other gateway children — we must NOT touch their style.display directly
+        // or we will corrupt Stripe/PayPal mounted iframes.
         var ccContainer = document.getElementById('creditCardInputFields');
         if (ccContainer) {
+            // Apply CSS-based hiding BEFORE making container visible to prevent flicker
+            ccContainer.classList.add('paymenthood-active');
             ccContainer.classList.remove('w-hidden');
             ccContainer.style.display = 'block';
-            
-            // HIDE ALL children EXCEPT our PaymentHood containers
-            // This hides: "Enter New Card Information Below", card inputs, CVV, etc.
-            var children = ccContainer.children;
-            for (var i = 0; i < children.length; i++) {
-                var child = children[i];
-                // Only show our PaymentHood divs - skip them entirely
-                if (child.id === 'paymenthood-profiles-container' || child.id === 'paymenthood-checkout-message' || child.id === 'paymenthood-checkout-separator') {
-                    continue; // Don't hide or mark our own containers
-                }
-                // Hide everything else and remember original state
-                if (!child.__phOriginalDisplay) {
-                    child.__phOriginalDisplay = child.style.display || '';
-                }
-                child.style.display = 'none';
-            }
         }
         
         logToServer('show_container', {
@@ -626,6 +723,9 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
         var c = document.getElementById('paymenthood-profiles-container');
         var m = document.getElementById('paymenthood-checkout-message');
         var sep = document.getElementById('paymenthood-checkout-separator');
+
+        // Remove CSS-based hiding so other gateways can display their fields normally
+        setPaymentHoodActive(false);
         
         // Hide our PaymentHood content
         if (c) {
@@ -638,22 +738,9 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
             sep.style.display = 'none';
         }
         
-        // RESTORE all hidden children for other gateways (EXCEPT our PaymentHood divs)
-        var ccContainer = document.getElementById('creditCardInputFields');
-        if (ccContainer) {
-            var children = ccContainer.children;
-            for (var i = 0; i < children.length; i++) {
-                var child = children[i];
-                // Don't restore our PaymentHood containers - they have their own visibility control
-                if (child.id === 'paymenthood-profiles-container' || child.id === 'paymenthood-checkout-message' || child.id === 'paymenthood-checkout-separator') {
-                    continue;
-                }
-                if (child.__phOriginalDisplay !== undefined) {
-                    child.style.display = child.__phOriginalDisplay;
-                    delete child.__phOriginalDisplay;
-                }
-            }
-        }
+        // Removing paymenthood-active is all that's needed — the CSS rule
+        // that hid other gateway children is gone, so WHMCS/Stripe can render normally.
+        // We must NOT restore style.display manually; doing so corrupts mounted iframes.
         
         logToServer('hide_container', {}, {});
     }
@@ -752,7 +839,29 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
             logToServer('initial_gateway', {
                 selected: selected
             }, {});
-            onGatewayChange(selected);
+            // If WHMCS hasn't checked a gateway radio yet, don't hide/show anything.
+            // We'll re-run via MutationObserver / delay once selection stabilizes.
+            if (selected) {
+                onGatewayChange(selected);
+            }
+
+            // Observe creditCardInputFields to immediately prevent it being hidden
+            // while PaymentHood is selected (avoids visible close/open flicker).
+            if (!window.__phCcObserverStarted) {
+                window.__phCcObserverStarted = true;
+                try {
+                    var ccContainer = document.getElementById('creditCardInputFields');
+                    if (ccContainer && window.MutationObserver) {
+                        var ccObserver = new MutationObserver(function(mutations) {
+                            // If WHMCS toggles w-hidden/display during switching, immediately correct.
+                            scheduleEnsureCreditCardContainerVisibleIfPaymenthood();
+                        });
+                        ccObserver.observe(ccContainer, { attributes: true, attributeFilter: ['class', 'style', 'hidden'] });
+                    }
+                } catch (e) {
+                    // no-op
+                }
+            }
 
             // Ultimate fallback: poll every 500ms to detect gateway changes
             // (handles edge cases where neither jQuery nor native events fire)
@@ -761,13 +870,40 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
                 var lastGateway = selected;
                 setInterval(function() {
                     var current = getSelectedPaymentMethod();
-                    if (current !== lastGateway) {
-                        lastGateway = current;
-                        onGatewayChange(current);
+
+                    // Ignore the transient empty state during WHMCS switching to avoid flicker.
+                    if (current) {
+                        if (current !== lastGateway) {
+                            lastGateway = current;
+                            onGatewayChange(current);
+                        }
+
+                        // Keep last-known gateway in sync for other logic
+                        try {
+                            if (typeof window !== 'undefined') {
+                                window.__phLastGateway = current;
+                            }
+                        } catch (e) {}
+                    }
+
+                    // When WHMCS is switching gateways, radios can be temporarily unchecked.
+                    // In that moment, prefer the last gateway from real events (window.__phLastGateway)
+                    // instead of the poll-local lastGateway (which can be stale and cause flicker).
+                    var effective = current;
+                    if (!effective) {
+                        try {
+                            effective = (typeof window !== 'undefined' && window.__phLastGateway) ? String(window.__phLastGateway || '') : '';
+                        } catch (e) {
+                            effective = '';
+                        }
+                    }
+                    if (!effective) {
+                        effective = lastGateway;
                     }
                     
                     // Ensure our content and shared container stay visible when PaymentHood is selected
-                    if (isPaymentHoodMethod(current)) {
+                    if (isPaymentHoodMethod(effective)) {
+                        setPaymentHoodActive(true);
                         var c = document.getElementById('paymenthood-profiles-container');
                         // If WHMCS cleared our nodes, rebuild them
                         if (!c || !c.parentElement) {
@@ -805,6 +941,8 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
                                 ccContainer.style.display = 'block';
                             }
                         }
+                    } else {
+                        setPaymentHoodActive(false);
                     }
                 }, 500);
             }
@@ -898,7 +1036,18 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
             } catch (e) {
                 current = null;
             }
-            if (!isInvoicePage() && current && !isPaymentHoodMethod(current)) {
+            // Use last known gateway as fallback for the transient empty-selection moment.
+            // Treat empty/unknown as "not PaymentHood" — abort the delayed show.
+            var effectiveCurrent = current;
+            if (!effectiveCurrent) {
+                try {
+                    effectiveCurrent = (typeof window !== 'undefined' && window.__phLastGateway)
+                        ? String(window.__phLastGateway || '') : '';
+                } catch (e) {
+                    effectiveCurrent = '';
+                }
+            }
+            if (!isInvoicePage() && !isPaymentHoodMethod(effectiveCurrent)) {
                 return;
             }
             showContainer();
@@ -911,6 +1060,12 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
     }
 
     function onGatewayChange(selectedMethod) {
+        // During WHMCS switching, selection can be temporarily empty.
+        // Don't hide/show in that moment (it causes visible close/open flicker).
+        if (!selectedMethod) {
+            return;
+        }
+
         var isPaymentHood = isPaymentHoodMethod(selectedMethod);
 
         if (typeof window !== 'undefined') {
@@ -928,6 +1083,8 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
         }, {});
 
         if (isPaymentHood) {
+            // Apply CSS-based hiding immediately to prevent CC fields flashing
+            setPaymentHoodActive(true);
             // WHMCS sometimes re-renders the shared creditCardInputFields shortly after
             // the change event, which can hide/clear our content. Re-apply visibility.
             showContainer();
@@ -1023,29 +1180,6 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
             });
     }
 
-    var selectedProfileId = null;
-
-    function selectProfile(profileId) {
-        selectedProfileId = profileId;
-
-        // Update visual selection
-        var items = document.querySelectorAll('.paymenthood-profile-item');
-        items.forEach(function(el) {
-            if (el.getAttribute('data-profile-id') === String(profileId)) {
-                el.classList.add('selected');
-            } else {
-                el.classList.remove('selected');
-            }
-        });
-
-        // Persist selection to session via POST
-        fetch('{$ajaxUrl}', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ profileId: profileId })
-        }).catch(function() {});
-    }
-
     function displayProfiles(profilesList) {
         var container = document.getElementById('paymenthood-profiles-container');
         
@@ -1106,20 +1240,6 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
         container.innerHTML = html;
 
         attachIconFallbackHandlers(container);
-
-        // Bind click handlers for selection
-        var items = container.querySelectorAll('.paymenthood-profile-item');
-        items.forEach(function(el) {
-            el.addEventListener('click', function() {
-                selectProfile(el.getAttribute('data-profile-id'));
-            });
-        });
-
-        // Auto-select first profile
-        if (supportedProfiles.length > 0) {
-            var firstId = supportedProfiles[0].paymentProfileId || supportedProfiles[0].checkoutMethod || '';
-            selectProfile(firstId);
-        }
     }
 
     // React to OS/theme changes
