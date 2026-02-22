@@ -16,11 +16,28 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
     try {
         $gateway = paymenthood_GATEWAY;
 
-        // Only load on checkout page
+        // Only load on checkout page or invoice page (where gateway panels live)
         $filename = $_SERVER['PHP_SELF'] ?? '';
-        if (strpos($filename, 'cart.php') === false && strpos($filename, 'checkout') === false) {
+        $requestUri = $_SERVER['REQUEST_URI'] ?? '';
+        
+        PaymentHoodHandler::safeLogModuleCall('hook_execution_start', [
+            'filename' => $filename,
+            'requestUri' => $requestUri,
+            'gateway' => $gateway
+        ], []);
+        
+        if (strpos($filename, 'cart.php') === false
+            && strpos($filename, 'checkout') === false
+            && strpos($filename, 'viewinvoice.php') === false) {
+            PaymentHoodHandler::safeLogModuleCall('hook_skipped_wrong_page', [
+                'filename' => $filename
+            ], []);
             return '';
         }
+        
+        PaymentHoodHandler::safeLogModuleCall('hook_proceeding', [
+            'filename' => $filename
+        ], []);
 
         // Get gateway settings including checkout message
         // WHMCS may normalize gateway setting keys to lowercase in some contexts/versions.
@@ -163,10 +180,17 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
         $ajaxUrl = $systemUrl . '/modules/gateways/' . rawurlencode($gateway) . '/get-payment-profiles.php';
         $iconProxyBase = $systemUrl . '/modules/gateways/' . rawurlencode($gateway) . '/get-payment-profiles.php?proxy=1&u=';
 
+        PaymentHoodHandler::safeLogModuleCall('hook_returning_html', [
+            'ajaxUrl' => $ajaxUrl,
+            'iconProxyBase' => $iconProxyBase,
+            'checkoutMessageLength' => strlen($checkoutMessage)
+        ], []);
+
         return <<<HTML
 <style>
 .paymenthood-checkout-message {
     margin-top: 15px;
+    margin-bottom: 18px;
     padding: 12px 15px;
     background: #e7f3ff;
     border: 1px solid #b3d9ff;
@@ -174,27 +198,14 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
     color: #004085;
     font-size: 14px;
     line-height: 1.5;
-    display: none;
-}
-
-.paymenthood-checkout-message.active {
-    display: block;
 }
 
 .paymenthood-profiles-container {
-    margin-top: 15px;
-    padding: 15px;
-    background: #f8f9fa;
-    border: 1px solid #dee2e6;
-    border-radius: 4px;
-    display: none;
-}
-
-.paymenthood-profiles-container.active {
-    display: block;
+    margin-top: 0;
 }
 
 .paymenthood-profiles-title {
+    margin-top: 2px;
     font-weight: bold;
     margin-bottom: 10px;
     color: #333;
@@ -211,20 +222,34 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
     background: white;
     border: 2px solid #e0e0e0;
     border-radius: 4px;
-    cursor: default;
-    transition: none;
+    cursor: pointer;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
     text-align: center;
+    user-select: none;
+}
+
+.paymenthood-profile-header {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
 }
 
 .paymenthood-profile-item:hover {
-    border-color: #e0e0e0;
-    box-shadow: none;
+    border-color: #80bdff;
+    box-shadow: 0 0 0 3px rgba(0,123,255,0.1);
+}
+
+.paymenthood-profile-item.selected {
+    border-color: #007bff;
+    box-shadow: 0 0 0 3px rgba(0,123,255,0.2);
+    background: #f0f7ff;
 }
 
 .paymenthood-profile-icon {
     width: 60px;
     height: 40px;
-    margin: 0 auto 6px;
+    margin: 0;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -244,7 +269,9 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
     font-size: 13px;
     font-weight: 600;
     color: #333;
-    margin-bottom: 4px;
+    margin: 0;
+    line-height: 1.2;
+    word-break: break-word;
 }
 
 .paymenthood-profile-type {
@@ -274,6 +301,20 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
     var profiles = [];
     var checkoutMessage = {$checkoutMessageJs};
 
+    // Send logs to server instead of browser console
+    function logToServer(action, request, response) {
+        fetch('{$ajaxUrl}', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                logClient: true,
+                action: action,
+                request: request || {},
+                response: response || {}
+            })
+        }).catch(function() {});
+    }
+
     function toArray(nodeList) {
         try {
             return Array.prototype.slice.call(nodeList || []);
@@ -287,6 +328,18 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
         if (select && select.value) {
             return select.value;
         }
+
+        // Prefer real radio selection. If radios exist but none are checked yet,
+        // do NOT fall back to the hidden input because it can be stale.
+        var radios = document.querySelectorAll('input[name="paymentmethod"][type="radio"]');
+        if (radios && radios.length) {
+            var checkedRadio = document.querySelector('input[name="paymentmethod"][type="radio"]:checked');
+            if (checkedRadio && checkedRadio.value) {
+                return checkedRadio.value;
+            }
+            return '';
+        }
+
         var checked = document.querySelector('input[name="paymentmethod"]:checked');
         if (checked && checked.value) {
             return checked.value;
@@ -345,6 +398,91 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
         return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
     }
 
+    function decodeHtmlEntities(str) {
+        // Decodes &lt; &gt; &amp; etc. Useful when the admin message is stored as entities.
+        var s = String(str || '');
+        var textarea = document.createElement('textarea');
+        textarea.innerHTML = s;
+        return textarea.value;
+    }
+
+    function sanitizeHtml(html) {
+        // Lightweight sanitizer: remove dangerous elements and JS/event handler attributes.
+        // This keeps basic formatting while preventing script execution.
+        var container = document.createElement('div');
+        container.innerHTML = String(html || '');
+
+        // Remove dangerous elements
+        var dangerous = container.querySelectorAll('script, style, iframe, object, embed, link, meta');
+        for (var i = 0; i < dangerous.length; i++) {
+            if (dangerous[i] && dangerous[i].parentNode) {
+                dangerous[i].parentNode.removeChild(dangerous[i]);
+            }
+        }
+
+        // Walk all nodes and strip dangerous attributes
+        var all = container.getElementsByTagName('*');
+        for (var j = 0; j < all.length; j++) {
+            var el = all[j];
+            if (!el || !el.attributes) {
+                continue;
+            }
+
+            // Copy attributes first because we'll mutate
+            var attrs = [];
+            for (var k = 0; k < el.attributes.length; k++) {
+                attrs.push(el.attributes[k].name);
+            }
+
+            attrs.forEach(function(name) {
+                var lower = String(name || '').toLowerCase();
+                // Remove inline event handlers and inline styles
+                if (lower.indexOf('on') === 0 || lower === 'style') {
+                    try { el.removeAttribute(name); } catch (e) {}
+                    return;
+                }
+
+                // Prevent javascript: URLs
+                if (lower === 'href' || lower === 'src') {
+                    var val = '';
+                    try { val = String(el.getAttribute(name) || ''); } catch (e) { val = ''; }
+                    if (/^\s*javascript:/i.test(val)) {
+                        try { el.removeAttribute(name); } catch (e) {}
+                        return;
+                    }
+                }
+            });
+
+            // Ensure safe rel when target=_blank
+            if (el.tagName && el.tagName.toLowerCase() === 'a') {
+                var target = (el.getAttribute('target') || '').toLowerCase();
+                if (target === '_blank') {
+                    var rel = (el.getAttribute('rel') || '');
+                    if (!/\bnoopener\b/i.test(rel)) {
+                        rel = (rel ? rel + ' ' : '') + 'noopener';
+                    }
+                    if (!/\bnoreferrer\b/i.test(rel)) {
+                        rel = (rel ? rel + ' ' : '') + 'noreferrer';
+                    }
+                    el.setAttribute('rel', rel.trim());
+                }
+            }
+        }
+
+        return container.innerHTML;
+    }
+
+    function getCheckoutMessageHtml() {
+        var raw = String(checkoutMessage || '');
+
+        // If the message looks like it contains encoded tags, decode entities first.
+        if (raw.indexOf('&lt;') !== -1 || raw.indexOf('&#60;') !== -1 || raw.indexOf('&gt;') !== -1 || raw.indexOf('&#62;') !== -1) {
+            raw = decodeHtmlEntities(raw);
+        }
+
+        return sanitizeHtml(raw);
+    }
+
     function attachIconFallbackHandlers(container) {
         if (!container) {
             return;
@@ -359,18 +497,6 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
 
             img.addEventListener('error', function(e) {
                 var direct = img.getAttribute('data-direct-src') || '';
-
-                console.error('PaymentHood: Icon load failed', {
-                    url: direct,
-                    currentSrc: img.src,
-                    complete: img.complete,
-                    naturalWidth: img.naturalWidth,
-                    naturalHeight: img.naturalHeight,
-                    event: e
-                });
-
-                // Temporarily DON'T hide so you can inspect in DevTools
-                // img.style.display = 'none';
 
                 // Best-effort server log
                 fetch('{$ajaxUrl}', {
@@ -389,130 +515,442 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
         });
     }
 
-    function initPaymentHoodProfiles() {
-        // Find all payment method inputs (radio buttons or select dropdowns)
-        var paymentInputs = document.querySelectorAll('input[name="paymentmethod"], select[name="paymentmethod"], select#paymentmethod');
-        var paymentInputsArr = toArray(paymentInputs);
-
-        if (paymentInputsArr.length === 0) {
-            // Try alternative selectors
-            paymentInputsArr = toArray(document.querySelectorAll('.payment-methods input[type="radio"], .payment-methods select'));
-        }
-
-        if (paymentInputsArr.length === 0) {
-            // Might be rendered dynamically; we re-run later.
-            return;
-        }
-
-        // Find an anchor near the PaymentHood option (for insertion)
-        function findPaymenthoodAnchor() {
-            for (var i = 0; i < paymentInputsArr.length; i++) {
-                var el = paymentInputsArr[i];
-                var id = (el && el.id) ? String(el.id).toLowerCase() : '';
-                var val = (el && el.value) ? String(el.value) : '';
-                if (isPaymentHoodMethod(val) || id.indexOf('paymenthood') !== -1) {
-                    return el;
-                }
+    function showContainer() {
+        // Safety: never force PaymentHood UI when another gateway is selected.
+        // (Important because we sometimes schedule delayed re-shows to survive WHMCS re-renders.)
+        if (!isInvoicePage()) {
+            var currentSelected = null;
+            try {
+                currentSelected = getSelectedPaymentMethod();
+            } catch (e) {
+                currentSelected = null;
             }
-            // If only a select exists, anchor to it
-            var select = document.querySelector('select[name="paymentmethod"], select#paymentmethod');
-            return select || paymentInputsArr[0] || null;
-        }
 
-        // Create checkout message container if it doesn't exist and message is set
-        var messageContainer = document.getElementById('paymenthood-checkout-message');
-        if (!messageContainer && checkoutMessage) {
-            messageContainer = document.createElement('div');
-            messageContainer.id = 'paymenthood-checkout-message';
-            messageContainer.className = 'paymenthood-checkout-message';
-            messageContainer.innerHTML = checkoutMessage;
-            
-            // Find PaymentHood payment method container and append message
-            var anchor = findPaymenthoodAnchor();
-            if (anchor) {
-                var parent = anchor.closest ? (anchor.closest('.payment-method') || anchor.closest('.radio') || anchor.closest('label')) : null;
-                parent = parent || anchor.parentElement;
-                if (parent && parent.parentElement) {
-                    parent.parentElement.insertBefore(messageContainer, parent.nextSibling);
-                }
-            }
-        }
-
-        // Create container for payment profiles if it doesn't exist
-        var container = document.getElementById('paymenthood-profiles-container');
-        if (!container) {
-            container = document.createElement('div');
-            container.id = 'paymenthood-profiles-container';
-            container.className = 'paymenthood-profiles-container';
-            container.innerHTML = '<div class="paymenthood-profiles-loading">Loading payment methods...</div>';
-            
-            // Find PaymentHood payment method container and append
-            var anchor = findPaymenthoodAnchor();
-            if (anchor) {
-                var parent = anchor.closest ? (anchor.closest('.payment-method') || anchor.closest('.radio') || anchor.closest('label')) : null;
-                parent = parent || anchor.parentElement;
-                if (parent && parent.parentElement) {
-                    // Insert after message if it exists, otherwise after parent
-                    var messageEl = document.getElementById('paymenthood-checkout-message');
-                    var insertAfter = messageEl || parent;
-                    insertAfter.parentElement.insertBefore(container, insertAfter.nextSibling);
-                }
-            }
-        }
-
-        // Add change event listeners
-        paymentInputsArr.forEach(function(input) {
-            if (!input || input.__phBoundChange) {
+            // Prefer the last known gateway from onGatewayChange, if available
+            var lastKnown = (typeof window !== 'undefined') ? window.__phLastGateway : null;
+            var effective = lastKnown || currentSelected;
+            if (effective && !isPaymentHoodMethod(effective)) {
                 return;
             }
-            input.__phBoundChange = true;
-            input.addEventListener('change', function() {
-                handlePaymentMethodChange(this.value);
-            });
-        });
+        }
 
-        // Check if PaymentHood is already selected
-        var selected = getSelectedPaymentMethod();
-        if (selected) {
-            handlePaymentMethodChange(selected);
+        var c = document.getElementById('paymenthood-profiles-container');
+        var m = document.getElementById('paymenthood-checkout-message');
+        var sep = document.getElementById('paymenthood-checkout-separator');
+        
+        // If containers don't exist (WHMCS may have removed them), recreate them
+        if (!c || !c.parentElement) {
+            logToServer('containers_missing_recreating', {
+                profilesContainerExists: !!c,
+                messageContainerExists: !!m
+            }, {});
+            
+            // Call createCheckoutContainers to recreate them
+            c = createCheckoutContainers();
+            m = document.getElementById('paymenthood-checkout-message');
+            sep = document.getElementById('paymenthood-checkout-separator');
+            
+            // If profiles were already loaded before, re-display them
+            if (c && profiles && profiles.length > 0) {
+                displayProfiles(profiles);
+            } else if (c && !c.__phLoaded) {
+                // Otherwise load them fresh
+                c.__phLoaded = true;
+                loadPaymentProfiles();
+            }
+        }
+
+        // Ensure the <br> separator exists between message and profiles (older installs may not have it)
+        if (!sep && m && c && m.parentElement && c.parentElement && m.parentElement === c.parentElement) {
+            try {
+                sep = document.createElement('br');
+                sep.id = 'paymenthood-checkout-separator';
+                sep.style.display = 'none';
+                c.parentElement.insertBefore(sep, c);
+            } catch (e) {
+                sep = null;
+            }
+        }
+        
+        // Show our PaymentHood content (force visible)
+        if (c) {
+            c.style.display = 'block';
+            c.classList.remove('w-hidden');
+        }
+        if (m && checkoutMessage) {
+            m.style.display = 'block';
+            m.classList.remove('w-hidden');
+            if (!m.__phSet) {
+                m.__phSet = true;
+                m.innerHTML = getCheckoutMessageHtml();
+            }
+        }
+        if (sep) {
+            sep.style.display = 'block';
+        }
+        
+        // Also show the shared creditCardInputFields container
+        var ccContainer = document.getElementById('creditCardInputFields');
+        if (ccContainer) {
+            ccContainer.classList.remove('w-hidden');
+            ccContainer.style.display = 'block';
+            
+            // HIDE ALL children EXCEPT our PaymentHood containers
+            // This hides: "Enter New Card Information Below", card inputs, CVV, etc.
+            var children = ccContainer.children;
+            for (var i = 0; i < children.length; i++) {
+                var child = children[i];
+                // Only show our PaymentHood divs - skip them entirely
+                if (child.id === 'paymenthood-profiles-container' || child.id === 'paymenthood-checkout-message' || child.id === 'paymenthood-checkout-separator') {
+                    continue; // Don't hide or mark our own containers
+                }
+                // Hide everything else and remember original state
+                if (!child.__phOriginalDisplay) {
+                    child.__phOriginalDisplay = child.style.display || '';
+                }
+                child.style.display = 'none';
+            }
+        }
+        
+        logToServer('show_container', {
+            containerFound: !!c,
+            messageFound: !!m,
+            ccContainerFound: !!ccContainer,
+            containerDisplay: c ? c.style.display : null,
+            messageDisplay: m ? m.style.display : null,
+            profilesCount: profiles ? profiles.length : 0
+        }, {});
+    }
+
+    function hideContainer() {
+        var c = document.getElementById('paymenthood-profiles-container');
+        var m = document.getElementById('paymenthood-checkout-message');
+        var sep = document.getElementById('paymenthood-checkout-separator');
+        
+        // Hide our PaymentHood content
+        if (c) {
+            c.style.display = 'none';
+        }
+        if (m) {
+            m.style.display = 'none';
+        }
+        if (sep) {
+            sep.style.display = 'none';
+        }
+        
+        // RESTORE all hidden children for other gateways (EXCEPT our PaymentHood divs)
+        var ccContainer = document.getElementById('creditCardInputFields');
+        if (ccContainer) {
+            var children = ccContainer.children;
+            for (var i = 0; i < children.length; i++) {
+                var child = children[i];
+                // Don't restore our PaymentHood containers - they have their own visibility control
+                if (child.id === 'paymenthood-profiles-container' || child.id === 'paymenthood-checkout-message' || child.id === 'paymenthood-checkout-separator') {
+                    continue;
+                }
+                if (child.__phOriginalDisplay !== undefined) {
+                    child.style.display = child.__phOriginalDisplay;
+                    delete child.__phOriginalDisplay;
+                }
+            }
+        }
+        
+        logToServer('hide_container', {}, {});
+    }
+
+    function isInvoicePage() {
+        var path = window.location.pathname || '';
+        return path.indexOf('viewinvoice.php') !== -1;
+    }
+
+    function initPaymentHoodProfiles() {
+        logToServer('init_profiles', {
+            page: window.location.pathname,
+            readyState: document.readyState
+        }, {});
+        
+        // Look for the profiles container. On viewinvoice.php it is rendered by _link().
+        // On the checkout page it may not exist yet, so we create it as a fallback.
+        var container = document.getElementById('paymenthood-profiles-container');
+        
+        logToServer('container_check', {
+            containerExists: !!container
+        }, {});
+
+        if (!container) {
+            // Fallback: create containers in the shared creditCardInputFields (checkout page)
+            container = createCheckoutContainers();
+            logToServer('create_containers_result', {
+                containerCreated: !!container
+            }, {});
+            if (!container) {
+                return; // retry via MutationObserver / setTimeout
+            }
+        }
+
+        // Populate the checkout message placeholder once
+        var messageContainer = document.getElementById('paymenthood-checkout-message');
+        if (messageContainer && checkoutMessage && !messageContainer.__phSet) {
+            messageContainer.__phSet = true;
+            messageContainer.innerHTML = getCheckoutMessageHtml();
+        }
+
+        // Fetch profiles only once
+        if (!container.__phLoaded) {
+            container.__phLoaded = true;
+            logToServer('loading_profiles', {}, {});
+            loadPaymentProfiles();
+        } else {
+            logToServer('profiles_already_loaded', {}, {});
+        }
+
+        if (isInvoicePage()) {
+            // On viewinvoice.php, WHMCS already shows the _link() output inside
+            // the Payment Details panel for the invoice's gateway. No radio buttons
+            // to toggle — just make everything visible immediately.
+            logToServer('invoice_page_show', {}, {});
+            showContainer();
+        } else {
+            logToServer('checkout_page_setup', {}, {});
+            // Checkout page: wire up gateway selection change listeners
+            // WHMCS uses jQuery to handle gateway switching. Native addEventListener('change')
+            // does NOT fire when jQuery's .prop('checked', true) or .trigger() is used.
+            // We must use jQuery event binding for reliable detection.
+
+            if (typeof jQuery !== 'undefined') {
+                // Use jQuery delegated event — works for dynamically rendered radios too
+                jQuery(document).off('change.paymenthood').on('change.paymenthood',
+                    'input[name="paymentmethod"], select[name="paymentmethod"]',
+                    function() {
+                        onGatewayChange(jQuery(this).val());
+                    }
+                );
+                // Also listen for click on radio labels (some templates use label clicks)
+                jQuery(document).off('click.paymenthood').on('click.paymenthood',
+                    'input[name="paymentmethod"]',
+                    function() {
+                        var val = jQuery(this).val();
+                        setTimeout(function() { onGatewayChange(val); }, 50);
+                    }
+                );
+            } else {
+                // Fallback: native listeners
+                var paymentInputs = toArray(document.querySelectorAll(
+                    'input[name="paymentmethod"], select[name="paymentmethod"], select#paymentmethod'
+                ));
+                paymentInputs.forEach(function(input) {
+                    if (input.__phBoundChange) { return; }
+                    input.__phBoundChange = true;
+                    input.addEventListener('change', function() {
+                        onGatewayChange(this.value);
+                    });
+                });
+            }
+
+            // Apply visibility for the currently selected gateway
+            var selected = getSelectedPaymentMethod();
+            logToServer('initial_gateway', {
+                selected: selected
+            }, {});
+            onGatewayChange(selected);
+
+            // Ultimate fallback: poll every 500ms to detect gateway changes
+            // (handles edge cases where neither jQuery nor native events fire)
+            if (!window.__phPollStarted) {
+                window.__phPollStarted = true;
+                var lastGateway = selected;
+                setInterval(function() {
+                    var current = getSelectedPaymentMethod();
+                    if (current !== lastGateway) {
+                        lastGateway = current;
+                        onGatewayChange(current);
+                    }
+                    
+                    // Ensure our content and shared container stay visible when PaymentHood is selected
+                    if (isPaymentHoodMethod(current)) {
+                        var c = document.getElementById('paymenthood-profiles-container');
+                        // If WHMCS cleared our nodes, rebuild them
+                        if (!c || !c.parentElement) {
+                            showContainer();
+                            c = document.getElementById('paymenthood-profiles-container');
+                        }
+                        if (c && c.style.display === 'none') {
+                            c.style.display = 'block';
+                        }
+                        
+                        var ccContainer = document.getElementById('creditCardInputFields');
+                        if (ccContainer) {
+                            // WHMCS templates may hide via class or inline style
+                            if (ccContainer.classList.contains('w-hidden')) {
+                                ccContainer.classList.remove('w-hidden');
+                            }
+                            if (ccContainer.classList.contains('hidden')) {
+                                ccContainer.classList.remove('hidden');
+                            }
+                            if (ccContainer.classList.contains('d-none')) {
+                                ccContainer.classList.remove('d-none');
+                            }
+                            if (ccContainer.hasAttribute('hidden')) {
+                                ccContainer.removeAttribute('hidden');
+                            }
+
+                            var display = '';
+                            try {
+                                display = window.getComputedStyle(ccContainer).display;
+                            } catch (e) {
+                                display = ccContainer.style.display;
+                            }
+
+                            if (display === 'none') {
+                                ccContainer.style.display = 'block';
+                            }
+                        }
+                    }
+                }, 500);
+            }
         }
     }
 
-    function handlePaymentMethodChange(selectedMethod) {
-        var container = document.getElementById('paymenthood-profiles-container');
-        var messageContainer = document.getElementById('paymenthood-checkout-message');
+    /**
+     * Fallback for checkout pages where _link() hasn't rendered containers.
+     * Inserts PaymentHood profiles into WHMCS's shared creditCardInputFields container.
+     */
+    function createCheckoutContainers() {
+        logToServer('create_checkout_containers', {}, {});
         
-        if (!container) {
-            return;
+        // WHMCS uses a single shared container for ALL gateway details
+        var ccContainer = document.getElementById('creditCardInputFields');
+        
+        if (!ccContainer) {
+            logToServer('no_creditCardInputFields', {}, {});
+            return null;
+        }
+        
+        logToServer('found_creditCardInputFields', {
+            className: ccContainer.className,
+            hasContent: ccContainer.innerHTML.length > 0
+        }, {});
+
+        // Clear any existing content (from other gateways) - WHMCS will manage this
+        // But check if our containers already exist first
+        var existingContainer = document.getElementById('paymenthood-profiles-container');
+        if (existingContainer) {
+            logToServer('containers_already_exist', {}, {});
+            return existingContainer;
         }
 
-        if (isPaymentHoodMethod(selectedMethod)) {
-            // Show message if it exists
-            if (messageContainer) {
-                messageContainer.classList.add('active');
+        var msgDiv = document.createElement('div');
+        msgDiv.id = 'paymenthood-checkout-message';
+        msgDiv.className = 'paymenthood-checkout-message';
+        msgDiv.style.display = 'none';
+
+        var sep = document.createElement('br');
+        sep.id = 'paymenthood-checkout-separator';
+        sep.style.display = 'none';
+
+        var container = document.createElement('div');
+        container.id = 'paymenthood-profiles-container';
+        container.className = 'paymenthood-profiles-container';
+        container.style.display = 'none';
+        container.innerHTML = '<div class="paymenthood-profiles-loading">Loading payment methods...</div>';
+
+        // Append to the shared creditCardInputFields container
+        ccContainer.appendChild(msgDiv);
+        ccContainer.appendChild(sep);
+        ccContainer.appendChild(container);
+        
+        logToServer('containers_inserted', {
+            parentId: ccContainer.id,
+            parentClass: ccContainer.className
+        }, {});
+
+        return container;
+    }
+
+    function cancelPendingShows() {
+        if (typeof window === 'undefined') {
+            return;
+        }
+        var timers = window.__phPendingShowTimeouts;
+        if (timers && timers.length) {
+            for (var i = 0; i < timers.length; i++) {
+                try {
+                    clearTimeout(timers[i]);
+                } catch (e) {}
             }
-            
-            container.classList.add('active');
-            
-            // Load profiles if not already loaded
-            if (profiles.length === 0) {
-                loadPaymentProfiles();
+        }
+        window.__phPendingShowTimeouts = [];
+    }
+
+    function scheduleShowIfStillSelected(token, delayMs) {
+        if (typeof window === 'undefined') {
+            return;
+        }
+        var id = setTimeout(function() {
+            // Only show if this is the latest gateway-change sequence
+            if (window.__phGatewayToken !== token) {
+                return;
             }
+            // And only if PaymentHood is STILL selected
+            var current = null;
+            try {
+                current = getSelectedPaymentMethod();
+            } catch (e) {
+                current = null;
+            }
+            if (!isInvoicePage() && current && !isPaymentHoodMethod(current)) {
+                return;
+            }
+            showContainer();
+        }, delayMs);
+
+        if (!window.__phPendingShowTimeouts) {
+            window.__phPendingShowTimeouts = [];
+        }
+        window.__phPendingShowTimeouts.push(id);
+    }
+
+    function onGatewayChange(selectedMethod) {
+        var isPaymentHood = isPaymentHoodMethod(selectedMethod);
+
+        if (typeof window !== 'undefined') {
+            window.__phLastGateway = selectedMethod;
+            // Increment token for every gateway change; used to cancel delayed shows
+            window.__phGatewayToken = (window.__phGatewayToken || 0) + 1;
+        }
+
+        // Cancel any pending delayed showContainer calls from a previous selection
+        cancelPendingShows();
+        
+        logToServer('gateway_change', {
+            selectedMethod: selectedMethod,
+            isPaymentHood: isPaymentHood
+        }, {});
+
+        if (isPaymentHood) {
+            // WHMCS sometimes re-renders the shared creditCardInputFields shortly after
+            // the change event, which can hide/clear our content. Re-apply visibility.
+            showContainer();
+            var token = (typeof window !== 'undefined') ? window.__phGatewayToken : 0;
+            scheduleShowIfStillSelected(token, 250);
+            scheduleShowIfStillSelected(token, 1000);
         } else {
-            // Hide message
-            if (messageContainer) {
-                messageContainer.classList.remove('active');
-            }
-            
-            container.classList.remove('active');
+            hideContainer();
         }
     }
 
     function loadPaymentProfiles() {
         var container = document.getElementById('paymenthood-profiles-container');
+        
+        logToServer('fetch_profiles', {
+            url: '{$ajaxUrl}'
+        }, {});
 
         fetch('{$ajaxUrl}')
             .then(function(response) {
+                logToServer('fetch_response', {
+                    status: response.status
+                }, {});
                 return response.text().then(function(text) {
                     var parsed;
                     try {
@@ -528,8 +966,20 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
                     }
 
                     if (parsed.success && parsed.profiles) {
+                        logToServer('profiles_received', {
+                            count: parsed.profiles.length
+                        }, {});
                         profiles = parsed.profiles;
                         displayProfiles(profiles);
+                        // After rendering profiles, ensure container is visible
+                        // if PaymentHood is currently selected (handles race condition)
+                        var current = getSelectedPaymentMethod();
+                        logToServer('after_display', {
+                            currentGateway: current
+                        }, {});
+                        if (isPaymentHoodMethod(current) || isInvoicePage()) {
+                            showContainer();
+                        }
                         return;
                     }
 
@@ -573,58 +1023,82 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
             });
     }
 
+    var selectedProfileId = null;
+
+    function selectProfile(profileId) {
+        selectedProfileId = profileId;
+
+        // Update visual selection
+        var items = document.querySelectorAll('.paymenthood-profile-item');
+        items.forEach(function(el) {
+            if (el.getAttribute('data-profile-id') === String(profileId)) {
+                el.classList.add('selected');
+            } else {
+                el.classList.remove('selected');
+            }
+        });
+
+        // Persist selection to session via POST
+        fetch('{$ajaxUrl}', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ profileId: profileId })
+        }).catch(function() {});
+    }
+
     function displayProfiles(profilesList) {
         var container = document.getElementById('paymenthood-profiles-container');
+        
+        logToServer('display_profiles', {
+            count: profilesList ? profilesList.length : 0
+        }, {});
 
-        console.log('PaymentHood: displayProfiles called with', profilesList);
-        console.log('PaymentHood: Full profiles data:', JSON.stringify(profilesList, null, 2));
-
-        // Only show supported providers (must have provider name)
+        // Show profiles when we have at least a name to display.
+        // Some profiles may not include paymentProvider.provider but do have paymentProfileName.
         var supportedProfiles = (profilesList || []).filter(function(p) {
-            return p && p.paymentProvider && p.paymentProvider.provider;
+            return p && (p.paymentProfileName || (p.paymentProvider && p.paymentProvider.provider));
         });
         
-        console.log('PaymentHood: Supported profiles count:', supportedProfiles.length);
-        
+        logToServer('supported_profiles', {
+            count: supportedProfiles.length
+        }, {});
+
         if (supportedProfiles.length === 0) {
             container.innerHTML = '<div class="paymenthood-profiles-error">No payment methods available</div>';
             return;
         }
 
-        var html = '<div class="paymenthood-profiles-list">';
+        var html = '<div class="paymenthood-profiles-title">You will be redirected to our secure payment page</div>';
+        html += '<div class="paymenthood-profiles-list">';
 
         supportedProfiles.forEach(function(profile) {
+            var profileId = profile.paymentProfileId || profile.checkoutMethod || '';
             var directIconUrl = normalizeUrl(getProviderIconUrl(profile));
             var proxyIconUrl = getProxiedIconUrl(directIconUrl);
             var providerName = (profile.paymentProvider && profile.paymentProvider.provider) ? profile.paymentProvider.provider : '';
             var profileName = profile.paymentProfileName;
+            var displayName = profileName || '';
 
-            console.log('PaymentHood: Rendering profile', {
-                provider: providerName,
-                profileName: profileName,
-                directIconUrl: directIconUrl,
-                proxyIconUrl: proxyIconUrl,
-                iconUri1: profile.paymentProvider ? profile.paymentProvider.iconUri1 : null,
-                iconUri2: profile.paymentProvider ? profile.paymentProvider.iconUri2 : null,
-                isDarkMode: isDarkMode()
-            });
+            html += '<div class="paymenthood-profile-item" data-profile-id="' + escapeHtml(String(profileId)) + '">';
 
-            html += '<div class="paymenthood-profile-item">';
-            
+            html += '<div class="paymenthood-profile-header">';
             if (proxyIconUrl) {
                 html += '<div class="paymenthood-profile-icon">'
                     + '<img data-ph-icon="1" src="' + escapeHtml(proxyIconUrl) + '"'
                     + ' data-direct-src="' + escapeHtml(directIconUrl) + '"'
-                    + ' alt="' + escapeHtml(profileName || providerName) + '" loading="eager">'
+                    + ' alt="' + escapeHtml(displayName) + '" loading="eager">'
                     + '</div>';
-            } else {
-                console.warn('PaymentHood: No icon URL for provider:', providerName);
             }
-            
-            if (profileName) {
-                html += '<div class="paymenthood-profile-name">' + escapeHtml(profileName) + '</div>';
+
+            if (displayName) {
+                html += '<div class="paymenthood-profile-name">' + escapeHtml(displayName) + '</div>';
             }
-            html += '<div class="paymenthood-profile-type">' + escapeHtml(providerName) + '</div>';
+            html += '</div>';
+
+            // Optional: keep provider label (currently hidden via CSS)
+            if (providerName && profileName && providerName !== profileName) {
+                html += '<div class="paymenthood-profile-type">' + escapeHtml(providerName) + '</div>';
+            }
             html += '</div>';
         });
 
@@ -632,6 +1106,20 @@ add_hook('ClientAreaHeadOutput', 1, function($vars) {
         container.innerHTML = html;
 
         attachIconFallbackHandlers(container);
+
+        // Bind click handlers for selection
+        var items = container.querySelectorAll('.paymenthood-profile-item');
+        items.forEach(function(el) {
+            el.addEventListener('click', function() {
+                selectProfile(el.getAttribute('data-profile-id'));
+            });
+        });
+
+        // Auto-select first profile
+        if (supportedProfiles.length > 0) {
+            var firstId = supportedProfiles[0].paymentProfileId || supportedProfiles[0].checkoutMethod || '';
+            selectProfile(firstId);
+        }
     }
 
     // React to OS/theme changes

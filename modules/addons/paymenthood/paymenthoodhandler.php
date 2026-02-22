@@ -676,6 +676,17 @@ class PaymentHoodHandler
                     'showPayRecurringInCheckout' => $hasRecurringItem,
                 ];
 
+                // Attach selected payment profile from session (set by checkout page profile picker)
+                $selectedProfileId = $_SESSION['paymenthood_profile_id'] ?? null;
+                if (!empty($selectedProfileId) && $selectedProfileId !== 'creditcard') {
+                    $postData['paymentProfileId'] = (string) $selectedProfileId;
+                    self::safeLogModuleCall('handler_selected_profile', [
+                        'invoiceId' => $invoiceId,
+                    ], [
+                        'paymentProfileId' => $selectedProfileId,
+                    ]);
+                }
+
                 try {
                     $response = self::callApi(self::paymenthood_getPaymentBaseUrl() . "/apps/{$appId}/payments/hosted-page", $postData, $token);
                 } catch (\Throwable $apiEx) {
@@ -790,7 +801,7 @@ class PaymentHoodHandler
                 $html = $sandboxNotice;
                 $html .= '<div class="alert alert-info">A payment session is already in progress for this invoice.</div>';
                 $html .= '<a href="' . htmlspecialchars($redirectUrl) . '" class="btn btn-primary btn-block">Continue to Payment</a>';
-                return $html . self::loadHidePaymentMethodsJS();
+                return $html;
             }
 
             // Fallback: show a warning if redirect URL is missing
@@ -802,14 +813,18 @@ class PaymentHoodHandler
             ]);
             $html = $sandboxNotice;
             $html .= '<div class="alert alert-warning">This invoice cannot be paid via PaymentHood at the moment.</div>';
-            return $html . self::loadHidePaymentMethodsJS();
+            return $html;
         } else {
             // No payment found, show the payment button
             $systemUrl = self::getSystemUrl();
             $formAction = $systemUrl . 'viewinvoice.php?id=' . $invoiceId;
 
             $html = $sandboxNotice;
-            $html .= '<form id="paymenthood-form" method="post" action="' . htmlspecialchars($formAction) . '">
+            $html .= '<div id="paymenthood-checkout-message" class="paymenthood-checkout-message" style="display:none"></div>';
+            $html .= '<div id="paymenthood-profiles-container" class="paymenthood-profiles-container" style="display:none">'
+                   . '<div class="paymenthood-profiles-loading">Loading payment methods...</div>'
+                   . '</div>';
+            $html .= '<form id="paymenthood-form" method="post" action="' . htmlspecialchars($formAction) . '" style="margin-top:15px;">
                         <input type="hidden" name="invoiceid" value="' . htmlspecialchars($invoiceId) . '" />
                         <input type="hidden" name="paymentmethod" value="' . self::PAYMENTHOOD_GATEWAY . '" />
                         <button type="submit" class="btn btn-success btn-block">Pay Now with PaymentHood</button>
@@ -828,61 +843,8 @@ class PaymentHoodHandler
                 ], []);
             }
 
-            return $html . $autoSubmitJs . self::loadHidePaymentMethodsJS();
+            return $html . $autoSubmitJs;
         }
-    }
-
-    public static function loadHidePaymentMethodsJS()
-    {
-        return <<<HTML
-<script>
-(function() {
-    function hidePaymentMethodSelector() {
-        // Hide all radio buttons and their containers
-        var radios = document.querySelectorAll("input[type='radio'][name='paymentmethod']");
-        radios.forEach(function(radio) {
-            var container = radio.closest('.form-group') || radio.closest('.panel') || radio.closest('div.payment-methods');
-            if (container) {
-                container.style.display = 'none';
-            } else {
-                var parent = radio.closest('label') || radio.parentElement;
-                if (parent) parent.style.display = 'none';
-            }
-        });
-
-        // Hide dropdown and its container
-        var dropdown = document.querySelector("select[name='paymentmethod']");
-        if (dropdown) {
-            var container = dropdown.closest('.form-group') || dropdown.closest('.panel') || dropdown.parentElement;
-            if (container) {
-                container.style.display = 'none';
-            } else {
-                dropdown.style.display = 'none';
-            }
-        }
-
-        // Hide any labels for payment method selection
-        var labels = document.querySelectorAll('label[for*="paymentmethod"], label');
-        labels.forEach(function(label) {
-            if (label.textContent.match(/payment\s*method/i)) {
-                label.style.display = 'none';
-            }
-        });
-    }
-
-    // Run initially
-    hidePaymentMethodSelector();
-
-    // Observe the entire body for dynamically added content
-    if (window.MutationObserver) {
-        var observer = new MutationObserver(function() {
-            hidePaymentMethodSelector();
-        });
-        observer.observe(document.body, { childList: true, subtree: true });
-    }
-})();
-</script>
-HTML;
     }
 
     public static function processUnpaidInvoices()

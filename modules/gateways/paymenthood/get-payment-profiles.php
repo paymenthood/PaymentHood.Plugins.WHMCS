@@ -282,6 +282,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $paymenthoodRespond(200, ['success' => true]);
         }
 
+        if (!empty($input['logClient'])) {
+            PaymentHoodHandler::safeLogModuleCall(
+                'client_' . ($input['action'] ?? 'log'),
+                $input['request'] ?? [],
+                $input['response'] ?? []
+            );
+
+            $paymenthoodRespond(200, ['success' => true]);
+        }
+
         $profileId = $input['profileId'] ?? null;
         if ($profileId !== null && $profileId !== '') {
             $_SESSION['paymenthood_profile_id'] = $profileId;
@@ -308,13 +318,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 // GET: fetch profiles
+PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_start', [], [
+    'message' => 'Starting GET request handler',
+]);
+
 try {
+    PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_fetch_credentials', [], [
+        'message' => 'Fetching gateway credentials',
+    ]);
+    
     $credentials = PaymentHoodHandler::getGatewayCredentials();
     $appId = $credentials['appId'] ?? null;
     $token = $credentials['token'] ?? null;
+    
+    PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_credentials_retrieved', [], [
+        'hasAppId' => $appId ? true : false,
+        'hasToken' => $token ? true : false,
+        'appIdPresent' => $appId ? 'yes' : 'no',
+        'tokenPresent' => $token ? 'yes' : 'no',
+    ]);
 
     if (empty($appId) || empty($token)) {
         PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_missing_credentials', [], [
+            'error' => 'Missing credentials',
             'hasAppId' => !empty($appId),
             'hasToken' => !empty($token),
         ]);
@@ -323,8 +349,18 @@ try {
             'error' => 'PaymentHood not configured'
         ]);
     }
+    
+    PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_credentials_validated', [], [
+        'message' => 'Credentials validated successfully',
+    ]);
 
     $url = PaymentHoodHandler::paymenthood_getPaymentAppBaseUrl() . "/apps/{$appId}/payment-profiles/payment-checkout-methods";
+    
+    PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_api_call_prep', [
+        'url' => $url,
+    ], [
+        'message' => 'Preparing API call',
+    ]);
 
     $ch = curl_init($url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -343,11 +379,16 @@ try {
         'url' => $url,
     ], [
         'httpCode' => $httpCode,
-        'curlError' => $curlError,
-        'responseLength' => is_string($response) ? strlen($response) : null,
+        'curlError' => $curlError ?: 'none',
+        'responseLength' => is_string($response) ? strlen($response) : 0,
+        'message' => 'API call completed',
     ]);
 
     if ($response === false) {
+        PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_curl_failed', [], [
+            'error' => 'cURL request failed',
+            'curlError' => $curlError,
+        ]);
         $paymenthoodRespond(502, [
             'success' => false,
             'error' => 'Upstream call failed',
@@ -357,6 +398,11 @@ try {
 
     if ($httpCode < 200 || $httpCode >= 300) {
         $snippet = is_string($response) ? substr($response, 0, 500) : null;
+        PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_api_error', [], [
+            'error' => 'API returned error',
+            'httpCode' => $httpCode,
+            'responseSnippet' => $snippet,
+        ]);
         $paymenthoodRespond($httpCode > 0 ? $httpCode : 502, [
             'success' => false,
             'error' => 'PaymentHood API returned error',
@@ -365,22 +411,52 @@ try {
         ]);
     }
 
+    PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_decode_json', [], [
+        'message' => 'Decoding JSON response',
+    ]);
+    
     $checkoutMethods = json_decode($response, true);
+    
     if (!is_array($checkoutMethods)) {
+        PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_invalid_json', [], [
+            'error' => 'Invalid JSON response',
+            'responsePreview' => substr($response, 0, 200),
+        ]);
         $paymenthoodRespond(502, [
             'success' => false,
             'error' => 'Invalid JSON from PaymentHood API'
         ]);
     }
+    
+    PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_json_decoded', [], [
+        'message' => 'JSON decoded successfully',
+        'checkoutMethodsCount' => count($checkoutMethods),
+    ]);
 
     // Flatten the response based on checkoutMethod
+    PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_process_start', [], [
+        'message' => 'Starting to process checkout methods',
+    ]);
+    
     $activeProfiles = [];
-    foreach ($checkoutMethods as $checkoutMethodGroup) {
+    foreach ($checkoutMethods as $index => $checkoutMethodGroup) {
         $checkoutMethod = $checkoutMethodGroup['checkoutMethod'] ?? '';
+        
+        PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_process_method', [
+            'methodIndex' => $index + 1,
+            'checkoutMethod' => $checkoutMethod,
+        ], [
+            'message' => 'Processing checkout method',
+        ]);
         
         if ($checkoutMethod === 'CreditCard') {
             // Extract card icons from paymentCheckoutMethodItems
             $items = $checkoutMethodGroup['paymentCheckoutMethodItems'] ?? [];
+            
+            PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_creditcard', [], [
+                'message' => 'Processing CreditCard checkout method',
+                'itemsCount' => count($items),
+            ]);
             $firstItem = !empty($items) ? $items[0] : [];
             
             // API returns iconUri1 and iconUri2 directly on the item
@@ -405,23 +481,57 @@ try {
                 'isSupportSubscription' => $isSupportSubscription,
                 'isSupportSinglePayment' => $isSupportSinglePayment,
             ];
+            
+            PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_creditcard_added', [], [
+                'message' => 'Added CreditCard profile',
+            ]);
         } elseif ($checkoutMethod === 'ProviderHostedPage') {
             // Loop through all paymentCheckoutMethodItems
             $items = $checkoutMethodGroup['paymentCheckoutMethodItems'] ?? [];
-            foreach ($items as $item) {
+            
+            PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_provider_hosted', [], [
+                'message' => 'Processing ProviderHostedPage checkout method',
+                'itemsCount' => count($items),
+            ]);
+            foreach ($items as $itemIndex => $item) {
                 $profile = $item['paymentProfile'] ?? null;
                 if ($profile && isset($profile['isActive']) && $profile['isActive'] === true) {
+                    PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_add_active', [
+                        'paymentProfileId' => $profile['paymentProfileId'] ?? 'unknown',
+                        'paymentProfileName' => $profile['paymentProfileName'] ?? 'unknown',
+                    ], [
+                        'message' => 'Adding active profile',
+                    ]);
+                    
                     // Add additional fields from the item
                     $profile['isSupportSubscription'] = $item['isSupportSubscription'] ?? false;
                     $profile['isSupportSinglePayment'] = $item['isSupportSinglePayment'] ?? true;
                     $profile['paymentMethodAddMode'] = $item['paymentMethodAddMode'] ?? null;
                     $profile['checkoutMethod'] = $checkoutMethod;
                     $activeProfiles[] = $profile;
+                } else {
+                    PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_skip_inactive', [], [
+                        'message' => 'Skipping inactive profile',
+                        'itemIndex' => $itemIndex,
+                        'hasProfile' => $profile ? 'yes' : 'no',
+                        'isActive' => isset($profile['isActive']) ? ($profile['isActive'] ? 'yes' : 'no') : 'not set',
+                    ]);
                 }
             }
+        } else {
+            PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_unknown_method', [
+                'checkoutMethod' => $checkoutMethod,
+            ], [
+                'message' => 'Unknown checkout method',
+            ]);
         }
     }
 
+    PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_success', [], [
+        'message' => 'SUCCESS - Returning active profiles',
+        'profileCount' => count($activeProfiles),
+    ]);
+    
     $paymenthoodRespond(200, [
         'success' => true,
         'profiles' => array_values($activeProfiles),
