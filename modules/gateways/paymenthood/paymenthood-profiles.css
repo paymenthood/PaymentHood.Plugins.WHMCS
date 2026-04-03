@@ -1,0 +1,132 @@
+.paymenthood-checkout-message {
+    margin-top: 15px;
+    margin-bottom: 18px;
+    padding: 12px 15px;
+    background: #e7f3ff;
+    border: 1px solid #b3d9ff;
+    border-radius: 4px;
+    color: #004085;
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.paymenthood-profiles-container {
+    margin-top: 0;
+}
+
+.paymenthood-profiles-title {
+    /* Styles handled by alert alert-info classes from theme */
+    margin-bottom: 12px;
+    font-weight: 600;
+}
+
+.paymenthood-profiles-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 10px;
+}
+
+.paymenthood-checkout-message {
+    padding: 10px;
+    background: #f8f9fa; /* Light gray to contrast on any background */
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    margin-bottom: 20px;
+    font-size: 14px;
+    color: #495057; /* Dark gray for readability */
+    line-height: 1.5;
+}
+
+.paymenthood-profile-item {
+    padding: 8px;
+    background: white;
+    border: 2px solid #e0e0e0;
+    border-radius: 4px;
+    cursor: default;
+    text-align: center;
+    user-select: none;
+    pointer-events: none;
+}
+
+.paymenthood-profile-header {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+}
+
+.paymenthood-profile-icon {
+    width: 60px;
+    height: 40px;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: visible;
+}
+
+.paymenthood-profile-icon img {
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    display: block;
+}
+
+.paymenthood-profile-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: #333;
+    margin: 0;
+    line-height: 1.2;
+    word-break: break-word;
+}
+
+.paymenthood-profile-type {
+    font-size: 11px;
+    color: #666;
+    display: none;
+}
+
+.paymenthood-profiles-loading {
+    text-align: center;
+    padding: 20px;
+    color: #999;
+    font-style: italic;
+    /* Prevent layout shift during loading if possible */
+    min-height: 50px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    /* Delay showing loading text to avoid flash on fast connections/cache */
+    opacity: 0;
+    animation: paymenthood-fade-in 0.3s ease 0.15s forwards;
+}
+
+.paymenthood-profiles-error {
+    padding: 10px;
+    background: #fff3cd;
+    border: 1px solid #ffc107;
+    border-radius: 4px;
+    color: #856404;
+    text-align: center;
+}
+
+/* Ensure our own content fades in smoothly - but only on first appearance */
+.paymenthood-profiles-container:not(.paymenthood-animated),
+.paymenthood-checkout-message:not(.paymenthood-animated) {
+    animation: paymenthood-fade-in 0.3s ease-out;
+}
+
+/* Mark as animated to prevent re-triggering on subsequent shows */
+.paymenthood-profiles-container.paymenthood-animated,
+.paymenthood-checkout-message.paymenthood-animated {
+    /* No animation on subsequent shows */
+}
+
+@keyframes paymenthood-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}

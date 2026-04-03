@@ -414,6 +414,26 @@ class PaymentHoodHandler
     }
 
     /**
+     * Render a PHP template from modules/addons/paymenthood/templates/ and return its output.
+     * Variables in $vars are extracted into the template's local scope.
+     *
+     * @param string $template  Template filename without .php extension
+     * @param array  $vars      Variables to expose inside the template
+     * @return string           Rendered HTML
+     */
+    public static function renderTemplate(string $template, array $vars = []): string
+    {
+        $templatePath = __DIR__ . '/templates/' . $template . '.php';
+        if (!is_file($templatePath)) {
+            return '<!-- PaymentHood: template "' . htmlspecialchars($template) . '" not found -->';
+        }
+        extract($vars, EXTR_SKIP);
+        ob_start();
+        include $templatePath;
+        return (string) ob_get_clean();
+    }
+
+    /**
      * Safe wrapper for logging that works across WHMCS contexts
      * @param string $action Action being performed
      * @param array|string $request Request data or simple string data
@@ -608,7 +628,7 @@ class PaymentHoodHandler
                 ]);
 
                 if (!isset($apiResult['result']) || $apiResult['result'] !== 'success') {
-                    return '<div class="alert alert-danger">Failed to create order. Please check your cart and try again.</div>';
+                    return self::renderTemplate('error-cart-order');
                 }
             }
 
@@ -695,17 +715,8 @@ class PaymentHoodHandler
 
                     if ($msg !== '' && stripos($msg, $needle) !== false) {
                         $manageUrl = rtrim(self::paymenthood_ConsoleUrl(), '/') . '/' . urlencode((string) $appId) . '/gateways';
-                        $sandboxNotice = '';
-                        if (!empty($useSandbox)) {
-                            $sandboxNotice = '<div id="paymenthood-sandbox-notice" class="alert alert-info" role="alert" style="margin-bottom:10px;"><strong>Sandbox Mode</strong> is enabled for PaymentHood. Payments will use sandbox credentials.</div>';
-                        }
-                        $html = '<div class="alert alert-warning" role="alert">'
-                            . '<strong>PaymentHood is not configured for this currency.</strong><br />'
-                            . 'You have not defined any payment gateway/profile for this app and currency yet.<br />'
-                            . 'Please configure your gateways in the PaymentHood Console: '
-                            . '<a href="' . htmlspecialchars($manageUrl) . '" target="_blank" rel="noopener noreferrer">Manage PaymentHood Gateways</a>.'
-                            . '</div>';
-                        return $sandboxNotice . $html;
+                        $sandboxNotice = !empty($useSandbox) ? self::renderTemplate('sandbox-notice') : '';
+                        return $sandboxNotice . self::renderTemplate('error-currency', ['manageUrl' => $manageUrl]);
                     }
 
                     throw $apiEx;
@@ -754,11 +765,8 @@ class PaymentHoodHandler
                 'trace' => $ex->getTraceAsString()
             ]);
             $isSandbox = self::isSandboxModeEnabled();
-            $sandboxNotice = '';
-            if ($isSandbox) {
-                $sandboxNotice = '<div id="paymenthood-sandbox-notice" class="alert alert-info" role="alert" style="margin-bottom:10px;"><strong>Sandbox Mode</strong> is enabled for PaymentHood. Payments will use sandbox credentials.</div>';
-            }
-            return $sandboxNotice . '<div class="alert alert-danger">paymentHood Error: ' . htmlspecialchars($ex->getMessage()) . '</div>';
+            $sandboxNotice = $isSandbox ? self::renderTemplate('sandbox-notice') : '';
+            return $sandboxNotice . self::renderTemplate('error-general', ['errorMessage' => $ex->getMessage()]);
         }
     }
 
@@ -767,10 +775,7 @@ class PaymentHoodHandler
         // Check if payment already exists
         $paymentStatus = self::checkInvoiceStatus($invoiceId, $appId, $token);
 
-        $sandboxNotice = '';
-        if ($useSandbox) {
-            $sandboxNotice = '<div id="paymenthood-sandbox-notice" class="alert alert-info" role="alert" style="margin-bottom:10px;"><strong>Sandbox Mode</strong> is enabled for PaymentHood. Payments will use sandbox credentials.</div>';
-        }
+        $sandboxNotice = $useSandbox ? self::renderTemplate('sandbox-notice') : '';
 
         self::safeLogModuleCall('handler_render_invoice_ui', [
             'invoiceId' => $invoiceId,
@@ -798,10 +803,7 @@ class PaymentHoodHandler
                     'invoiceId' => $invoiceId,
                     'redirectUrl' => $redirectUrl
                 ], []);
-                $html = $sandboxNotice;
-                $html .= '<div class="alert alert-info">A payment session is already in progress for this invoice.</div>';
-                $html .= '<a href="' . htmlspecialchars($redirectUrl) . '" class="btn btn-primary btn-block">Continue to Payment</a>';
-                return $html;
+                return $sandboxNotice . self::renderTemplate('invoice-continue', ['redirectUrl' => $redirectUrl]);
             }
 
             // Fallback: show a warning if redirect URL is missing
@@ -811,24 +813,17 @@ class PaymentHoodHandler
                 'error' => 'Payment exists but redirectUrl missing',
                 'paymentId' => $paymentStatus['paymentId'] ?? null
             ]);
-            $html = $sandboxNotice;
-            $html .= '<div class="alert alert-warning">This invoice cannot be paid via PaymentHood at the moment.</div>';
-            return $html;
+            return $sandboxNotice . self::renderTemplate('invoice-missing-redirect');
         } else {
             // No payment found, show the payment button
             $systemUrl = self::getSystemUrl();
             $formAction = $systemUrl . 'viewinvoice.php?id=' . $invoiceId;
 
-            $html = $sandboxNotice;
-            $html .= '<div id="paymenthood-checkout-message" class="paymenthood-checkout-message" style="display:none"></div>';
-            $html .= '<div id="paymenthood-profiles-container" class="paymenthood-profiles-container" style="display:none">'
-                   . '<div class="paymenthood-profiles-loading">Loading payment methods...</div>'
-                   . '</div>';
-            $html .= '<form id="paymenthood-form" method="post" action="' . htmlspecialchars($formAction) . '" style="margin-top:15px;">
-                        <input type="hidden" name="invoiceid" value="' . htmlspecialchars($invoiceId) . '" />
-                        <input type="hidden" name="paymentmethod" value="' . self::PAYMENTHOOD_GATEWAY . '" />
-                        <button type="submit" class="btn btn-success btn-block">Pay Now with PaymentHood</button>
-                    </form>';
+            $html = $sandboxNotice . self::renderTemplate('invoice-pay-form', [
+                'formAction' => $formAction,
+                'invoiceId'  => (string) $invoiceId,
+                'gateway'    => self::PAYMENTHOOD_GATEWAY,
+            ]);
 
             // Add auto-submit JavaScript only if requested (checkout flow)
             $autoSubmitJs = '';

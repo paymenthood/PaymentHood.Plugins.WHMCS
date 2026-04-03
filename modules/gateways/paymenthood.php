@@ -357,6 +357,7 @@ function paymenthood_saveGatewaySetting($gateway, $setting, $value)
             $rows = Capsule::table('tblpaymentgateways')
                 ->where('gateway', $gateway)
                 ->whereRaw("TRIM(LOWER(setting)) = ?", [strtolower($setting)])
+                ->orderBy('id', 'desc')
                 ->get();
 
             $keepId = null;

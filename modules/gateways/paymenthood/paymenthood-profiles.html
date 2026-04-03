@@ -1,0 +1,55 @@
+<!--
+  PaymentHood Checkout – HTML Templates
+  ======================================
+  This file contains all HTML templates used by the PaymentHood checkout UI.
+  Each <template> block has a unique id. The JavaScript (paymenthood-profiles.js)
+  fetches this file once, parses it, and clones each template as needed.
+
+  Placeholders use {{name}} syntax. The JS replaces them before injection.
+
+  A front-end developer can freely edit the markup and classes here without
+  touching any JavaScript.
+-->
+
+<!-- Shown while payment profiles are being fetched -->
+<template id="ph-tpl-loading">
+    <div class="paymenthood-profiles-loading">Loading payment methods...</div>
+</template>
+
+<!-- Shown when an error occurs ({{message}} is replaced by JS) -->
+<template id="ph-tpl-error">
+    <div class="paymenthood-profiles-error">{{message}}</div>
+</template>
+
+<!-- Shown when no supported payment profiles are returned -->
+<template id="ph-tpl-no-profiles">
+    <div class="paymenthood-profiles-error">No payment methods available</div>
+</template>
+
+<!-- Wrapper for the full profiles list (contains grid) -->
+<template id="ph-tpl-profiles-wrapper">
+    <div class="paymenthood-profiles-list" data-ph-list></div>
+</template>
+
+<!-- One card per payment profile. Repeated inside .paymenthood-profiles-list -->
+<!-- Placeholders: {{profileId}}, {{displayName}}, {{providerName}} -->
+<template id="ph-tpl-profile-item">
+    <div class="paymenthood-profile-item" data-profile-id="{{profileId}}">
+        <div class="paymenthood-profile-header">
+            <!-- Icon slot: filled by JS only when an icon URL exists -->
+            <div class="paymenthood-profile-icon" data-ph-icon-slot></div>
+            <div class="paymenthood-profile-name">{{displayName}}</div>
+        </div>
+        <div class="paymenthood-profile-type">{{providerName}}</div>
+    </div>
+</template>
+
+<!-- Icon image inserted into .paymenthood-profile-icon when available -->
+<!-- Placeholders: {{proxyIconUrl}}, {{directIconUrl}}, {{alt}} -->
+<template id="ph-tpl-profile-icon">
+    <img data-ph-icon="1"
+         src="{{proxyIconUrl}}"
+         data-direct-src="{{directIconUrl}}"
+         alt="{{alt}}"
+         loading="eager">
+</template>
