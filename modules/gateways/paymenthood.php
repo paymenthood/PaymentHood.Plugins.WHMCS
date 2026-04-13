@@ -80,6 +80,15 @@ function paymenthood_config()
         ],
     ];
 
+    $inactiveState = PaymentHoodHandler::refreshAppInactiveState();
+    if (!empty($inactiveState['isInactive'])) {
+        $config['licenseStatus'] = [
+            'FriendlyName' => 'License Status',
+            'Type' => 'system',
+            'Description' => paymenthood_getInactiveLicenseNotice($inactiveState),
+        ];
+    }
+
     // Add extra links only if activated
     if ($activated == '1') {
         $config['manageSandboxGateways'] = [
@@ -105,6 +114,30 @@ function paymenthood_config()
     ];
 
     return $config;
+}
+
+function paymenthood_getInactiveLicenseNotice(array $inactiveState)
+{
+    $appId = isset($inactiveState['appId']) ? trim((string) $inactiveState['appId']) : '';
+    $message = isset($inactiveState['message']) ? trim((string) $inactiveState['message']) : '';
+    $detectedAt = isset($inactiveState['detectedAt']) ? trim((string) $inactiveState['detectedAt']) : '';
+    $renewUrl = PaymentHoodHandler::getManageLicensesUrl($appId);
+
+    $html = '<div style="padding:12px 14px;border:1px solid #f5c2c7;background:#fff3f3;color:#842029;border-radius:6px;">';
+    $html .= '<div style="font-weight:bold;margin-bottom:6px;">PaymentHood license expired</div>';
+    $html .= '<div>Your PaymentHood app is inactive. Renew the license to restore checkout and admin actions.</div>';
+
+    if ($renewUrl) {
+        $html .= '<div style="margin-top:12px;">'
+            . '<a href="' . htmlspecialchars($renewUrl) . '" target="_blank" rel="noopener" '
+            . 'style="padding:8px 16px;background:#dc3545;color:white;border-radius:4px;text-decoration:none;display:inline-block;">'
+            . 'Renew PaymentHood License'
+            . '</a></div>';
+    }
+
+    $html .= '</div>';
+
+    return $html;
 }
 
 function paymenthood_getActivationLink($activated)
@@ -254,6 +287,9 @@ function paymenthood_handleActivationReturn()
 
             // Store license Id
             paymenthood_saveGatewaySetting(paymenthood_GATEWAY, 'licenseId', $licenseId);
+
+            // Renewal succeeded; clear any previously stored inactive-license notice.
+            PaymentHoodHandler::clearAppInactiveState();
 
             // Create custom field for payment provider storage
             paymenthood_createCustomFields();
@@ -460,6 +496,12 @@ function paymenthood_link($params)
         ], [
             'error' => $ex->getMessage()
         ]);
+
+        if ($ex instanceof PaymentHoodAppInactiveException || PaymentHoodHandler::isAppInactiveError($ex)) {
+            $inactiveAppId = $ex instanceof PaymentHoodAppInactiveException ? $ex->getAppId() : null;
+            return PaymentHoodHandler::renderAppInactiveError($inactiveAppId, PaymentHoodHandler::extractAppInactiveErrorMessage($ex));
+        }
+
         // Stay on the same invoice page and show message
         return '<div class="alert alert-danger">Error: ' . htmlspecialchars($ex->getMessage()) . '</div>';
     }

@@ -396,6 +396,27 @@ try {
         ]);
     }
 
+    if ($response !== false && PaymentHoodHandler::isAppInactiveError($response)) {
+        PaymentHoodHandler::markAppInactive($appId, $response);
+        PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_app_inactive', [
+            'appId' => $appId,
+            'url' => $url,
+        ], [
+            'httpCode' => $httpCode,
+            'responseSnippet' => substr((string) $response, 0, 500),
+        ]);
+
+        $paymenthoodRespond(503, [
+            'success' => false,
+            'appInactive' => true,
+            'error' => PaymentHoodHandler::getCustomerAppInactiveMessage(),
+        ]);
+    }
+
+    if ($httpCode >= 200 && $httpCode < 300) {
+        PaymentHoodHandler::clearAppInactiveState();
+    }
+
     if ($httpCode < 200 || $httpCode >= 300) {
         $snippet = is_string($response) ? substr($response, 0, 500) : null;
         PaymentHoodHandler::safeLogModuleCall('get_payment_profiles_api_error', [], [
