@@ -10,9 +10,33 @@ if (defined('WHMCS_MAIL') && WHMCS_MAIL) {
     return '<a href="#">Pay with paymentHood</a>';
 }
 
+class PaymentHoodAppInactiveException extends \RuntimeException
+{
+    /** @var string|null */
+    private $appId;
+
+    public function __construct(?string $appId = null, string $message = 'PaymentHood app is inactive.')
+    {
+        parent::__construct($message !== '' ? $message : 'PaymentHood app is inactive.');
+        $appId = is_string($appId) ? trim($appId) : '';
+        $this->appId = $appId !== '' ? $appId : null;
+    }
+
+    public function getAppId(): ?string
+    {
+        return $this->appId;
+    }
+}
+
 class PaymentHoodHandler
 {
     const PAYMENTHOOD_GATEWAY = 'paymenthood';
+    private const APP_INACTIVE_EXCEPTION_NAME = 'Paymenting.Service.Exceptions.AppInactiveException';
+    private const APP_INACTIVE_CUSTOMER_MESSAGE = 'Payment service is temporarily unavailable. Please contact the administrator.';
+    private const APP_INACTIVE_FLAG_SETTING = 'AppInactiveDetected';
+    private const APP_INACTIVE_APP_ID_SETTING = 'AppInactiveAppId';
+    private const APP_INACTIVE_MESSAGE_SETTING = 'AppInactiveMessage';
+    private const APP_INACTIVE_AT_SETTING = 'AppInactiveAt';
 
     private static function toMoney($value): float
     {
@@ -326,6 +350,318 @@ class PaymentHoodHandler
         return !empty($rawValue);
     }
 
+    public static function isAdminArea(): bool
+    {
+        return defined('ADMINAREA') && (bool) ADMINAREA;
+    }
+
+    public static function getCustomerAppInactiveMessage(): string
+    {
+        return self::APP_INACTIVE_CUSTOMER_MESSAGE;
+    }
+
+    public static function getManageLicensesUrl(?string $appId): ?string
+    {
+        $appId = is_string($appId) ? trim($appId) : '';
+        if ($appId === '') {
+            return null;
+        }
+
+        return rtrim(self::paymenthood_ConsoleUrl(), '/') . '/' . urlencode($appId) . '/licenses';
+    }
+
+    public static function getGatewaySetting(string $setting)
+    {
+        $setting = trim($setting);
+        if ($setting === '') {
+            return null;
+        }
+
+        try {
+            return Capsule::table('tblpaymentgateways')
+                ->where('gateway', self::PAYMENTHOOD_GATEWAY)
+                ->whereRaw('LOWER(setting) = ?', [strtolower($setting)])
+                ->orderBy('id', 'desc')
+                ->value('value');
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    public static function saveGatewaySetting(string $setting, $value): void
+    {
+        $setting = trim($setting);
+        if ($setting === '') {
+            return;
+        }
+
+        try {
+            Capsule::connection()->transaction(function () use ($setting, $value) {
+                $rows = Capsule::table('tblpaymentgateways')
+                    ->where('gateway', self::PAYMENTHOOD_GATEWAY)
+                    ->whereRaw('LOWER(setting) = ?', [strtolower($setting)])
+                    ->orderBy('id', 'desc')
+                    ->get();
+
+                $keepId = null;
+                foreach ($rows as $row) {
+                    if ($keepId === null) {
+                        $keepId = $row->id;
+                    } else {
+                        Capsule::table('tblpaymentgateways')->where('id', $row->id)->delete();
+                    }
+                }
+
+                if ($keepId !== null) {
+                    Capsule::table('tblpaymentgateways')->where('id', $keepId)->update(['value' => $value]);
+                    return;
+                }
+
+                Capsule::table('tblpaymentgateways')->insert([
+                    'gateway' => self::PAYMENTHOOD_GATEWAY,
+                    'setting' => $setting,
+                    'value' => $value,
+                ]);
+            });
+        } catch (\Throwable $e) {
+            self::safeLogModuleCall('save_gateway_setting_error', [
+                'setting' => $setting,
+            ], [
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    public static function clearAppInactiveState(): void
+    {
+        self::saveGatewaySetting(self::APP_INACTIVE_FLAG_SETTING, '0');
+        self::saveGatewaySetting(self::APP_INACTIVE_APP_ID_SETTING, '');
+        self::saveGatewaySetting(self::APP_INACTIVE_MESSAGE_SETTING, '');
+        self::saveGatewaySetting(self::APP_INACTIVE_AT_SETTING, '');
+    }
+
+    public static function markAppInactive(?string $appId, $value): void
+    {
+        $message = self::extractAppInactiveErrorMessage($value);
+        $appId = is_string($appId) ? trim($appId) : '';
+
+        self::saveGatewaySetting(self::APP_INACTIVE_FLAG_SETTING, '1');
+        self::saveGatewaySetting(self::APP_INACTIVE_APP_ID_SETTING, $appId);
+        self::saveGatewaySetting(self::APP_INACTIVE_MESSAGE_SETTING, $message);
+        self::saveGatewaySetting(self::APP_INACTIVE_AT_SETTING, date('Y-m-d H:i:s'));
+    }
+
+    public static function getAppInactiveState(): array
+    {
+        $flag = self::getGatewaySetting(self::APP_INACTIVE_FLAG_SETTING);
+        $isActiveFlag = is_string($flag) ? trim($flag) : (string) $flag;
+
+        return [
+            'isInactive' => in_array(strtolower($isActiveFlag), ['1', 'on', 'yes', 'true'], true),
+            'appId' => self::getGatewaySetting(self::APP_INACTIVE_APP_ID_SETTING),
+            'message' => self::getGatewaySetting(self::APP_INACTIVE_MESSAGE_SETTING),
+            'detectedAt' => self::getGatewaySetting(self::APP_INACTIVE_AT_SETTING),
+        ];
+    }
+
+    public static function refreshAppInactiveState(): array
+    {
+        $state = self::getAppInactiveState();
+
+        $credentials = self::getGatewayCredentials();
+        $appId = isset($credentials['appId']) && is_string($credentials['appId']) ? trim($credentials['appId']) : '';
+        $token = isset($credentials['token']) && is_string($credentials['token']) ? trim($credentials['token']) : '';
+
+        if ($appId === '') {
+            $appId = isset($state['appId']) && is_string($state['appId']) ? trim($state['appId']) : '';
+        }
+
+        if ($appId === '' || $token === '') {
+            return $state;
+        }
+
+        $url = self::paymenthood_getPaymentAppBaseUrl() . '/apps/' . urlencode($appId);
+        $ch = curl_init($url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_HTTPGET, true);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            "Authorization: Bearer {$token}",
+            'Accept: application/json',
+        ]);
+
+        $response = curl_exec($ch);
+        $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlError = curl_error($ch);
+        curl_close($ch);
+
+        self::safeLogModuleCall('refresh_app_inactive_state', [
+            'appId' => $appId,
+            'url' => $url,
+        ], [
+            'httpCode' => $httpCode,
+            'curlError' => $curlError !== '' ? $curlError : null,
+            'responseSnippet' => is_string($response) ? substr($response, 0, 500) : null,
+        ]);
+
+        if ($response !== false && self::isAppInactiveError($response)) {
+            self::markAppInactive($appId, $response);
+            return self::getAppInactiveState();
+        }
+
+        if ($response !== false && $httpCode >= 200 && $httpCode < 300) {
+            $decoded = json_decode($response, true);
+            $isActive = null;
+            if (is_array($decoded) && array_key_exists('isActive', $decoded)) {
+                $isActive = filter_var($decoded['isActive'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+                if ($isActive === null) {
+                    $isActive = (bool) $decoded['isActive'];
+                }
+            }
+
+            if ($isActive === false) {
+                $licenseExpirationTime = '';
+                if (is_array($decoded) && isset($decoded['licenseExpirationTime']) && is_string($decoded['licenseExpirationTime'])) {
+                    $licenseExpirationTime = trim($decoded['licenseExpirationTime']);
+                }
+
+                $message = 'PaymentHood app is inactive.';
+                if ($licenseExpirationTime !== '') {
+                    $message .= ' License expiration time: ' . $licenseExpirationTime;
+                }
+
+                self::markAppInactive($appId, $message);
+                return self::getAppInactiveState();
+            }
+
+            self::clearAppInactiveState();
+            return self::getAppInactiveState();
+        }
+
+        return $state;
+    }
+
+    private static function extractAppIdFromUrl(string $url): ?string
+    {
+        if (preg_match('~/apps/([^/]+)~', $url, $matches) !== 1) {
+            return null;
+        }
+
+        $appId = urldecode((string) ($matches[1] ?? ''));
+        $appId = trim($appId);
+        return $appId !== '' ? $appId : null;
+    }
+
+    private static function collectNestedStrings($value): array
+    {
+        $strings = [];
+
+        if (is_string($value)) {
+            $trimmed = trim($value);
+            if ($trimmed !== '') {
+                $strings[] = $trimmed;
+            }
+            return $strings;
+        }
+
+        if (!is_array($value)) {
+            return $strings;
+        }
+
+        foreach ($value as $item) {
+            foreach (self::collectNestedStrings($item) as $nested) {
+                $strings[] = $nested;
+            }
+        }
+
+        return $strings;
+    }
+
+    public static function isAppInactiveError($value): bool
+    {
+        $haystacks = [];
+
+        if ($value instanceof \Throwable) {
+            $haystacks[] = $value->getMessage();
+        } elseif (is_string($value)) {
+            $haystacks[] = $value;
+            $decoded = json_decode($value, true);
+            if (is_array($decoded)) {
+                $haystacks = array_merge($haystacks, self::collectNestedStrings($decoded));
+            }
+        } elseif (is_array($value)) {
+            $haystacks = self::collectNestedStrings($value);
+        }
+
+        foreach ($haystacks as $haystack) {
+            if (!is_string($haystack) || $haystack === '') {
+                continue;
+            }
+
+            if (stripos($haystack, self::APP_INACTIVE_EXCEPTION_NAME) !== false || stripos($haystack, 'AppInactiveException') !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public static function extractAppInactiveErrorMessage($value): string
+    {
+        $haystacks = [];
+
+        if ($value instanceof \Throwable) {
+            $haystacks[] = $value->getMessage();
+        } elseif (is_string($value)) {
+            $haystacks[] = trim($value);
+            $decoded = json_decode($value, true);
+            if (is_array($decoded)) {
+                $haystacks = array_merge($haystacks, self::collectNestedStrings($decoded));
+            }
+        } elseif (is_array($value)) {
+            $haystacks = self::collectNestedStrings($value);
+        }
+
+        foreach ($haystacks as $haystack) {
+            if (!is_string($haystack)) {
+                continue;
+            }
+
+            $haystack = trim($haystack);
+            if ($haystack === '') {
+                continue;
+            }
+
+            if (stripos($haystack, self::APP_INACTIVE_EXCEPTION_NAME) !== false || stripos($haystack, 'AppInactiveException') !== false) {
+                return $haystack;
+            }
+        }
+
+        return 'PaymentHood app is inactive.';
+    }
+
+    private static function createAppInactiveException(?string $appId, $value): PaymentHoodAppInactiveException
+    {
+        self::markAppInactive($appId, $value);
+        return new PaymentHoodAppInactiveException($appId, self::extractAppInactiveErrorMessage($value));
+    }
+
+    public static function renderAppInactiveError(?string $appId = null, ?string $details = null): string
+    {
+        $isAdminArea = self::isAdminArea();
+        $errorMessage = $isAdminArea
+            ? 'PaymentHood app is inactive. Please review the license in the PaymentHood console.'
+            : self::getCustomerAppInactiveMessage();
+
+        $details = $isAdminArea && is_string($details) ? trim($details) : '';
+
+        return self::renderTemplate('error-general', [
+            'errorMessage' => $errorMessage,
+            'details' => $details !== '' ? $details : null,
+            'actionUrl' => $isAdminArea ? self::getManageLicensesUrl($appId) : null,
+            'actionLabel' => 'Manage PaymentHood License',
+        ]);
+    }
+
     /**
      * Best-effort check for whether WHMCS considers this gateway module activated.
      *
@@ -502,6 +838,8 @@ class PaymentHoodHandler
 
     public static function handleInvoice(array $params)
     {
+        $appId = null;
+
         try {
             $clientId = (int) ($params['clientdetails']['userid'] ?? 0);
             $invoiceId = (int) ($params['invoiceid'] ?? 0);
@@ -766,6 +1104,15 @@ class PaymentHoodHandler
             ]);
             $isSandbox = self::isSandboxModeEnabled();
             $sandboxNotice = $isSandbox ? self::renderTemplate('sandbox-notice') : '';
+
+            if ($ex instanceof PaymentHoodAppInactiveException || self::isAppInactiveError($ex)) {
+                $inactiveAppId = $ex instanceof PaymentHoodAppInactiveException
+                    ? $ex->getAppId()
+                    : (is_string($appId) ? $appId : null);
+
+                return $sandboxNotice . self::renderAppInactiveError($inactiveAppId, self::extractAppInactiveErrorMessage($ex));
+            }
+
             return $sandboxNotice . self::renderTemplate('error-general', ['errorMessage' => $ex->getMessage()]);
         }
     }
@@ -1031,6 +1378,7 @@ class PaymentHoodHandler
     private static function callApi(string $url, array $data, string $token, string $method = 'POST'): array
     {
         try {
+            $appId = self::extractAppIdFromUrl($url);
             $ch = curl_init($url);
             curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
             curl_setopt($ch, CURLOPT_HTTPHEADER, [
@@ -1045,7 +1393,24 @@ class PaymentHoodHandler
 
             $response = curl_exec($ch);
             $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curlError = curl_error($ch);
             curl_close($ch);
+
+            if ($response !== false && self::isAppInactiveError($response)) {
+                self::safeLogModuleCall('handler_api_app_inactive', [
+                    'url' => $url,
+                    'method' => $method,
+                    'appId' => $appId,
+                ], [
+                    'httpCode' => $httpCode,
+                    'response' => substr((string) $response, 0, 500),
+                ]);
+                throw self::createAppInactiveException($appId, $response);
+            }
+
+            if ($response !== false && $httpCode >= 200 && $httpCode < 300) {
+                self::clearAppInactiveState();
+            }
 
             if ($httpCode === 404) {
                 self::safeLogModuleCall('API not found (404)', ['url' => $url], ['httpCode' => $httpCode, 'response' => $response]);
@@ -1053,6 +1418,10 @@ class PaymentHoodHandler
                     '_httpCode' => 404,
                     '_rawResponse' => $response,
                 ];
+            }
+
+            if ($response === false) {
+                throw new \Exception($curlError !== '' ? $curlError : 'PaymentHood API call failed');
             }
 
             if (!$response || $httpCode >= 400) {
@@ -1209,14 +1578,15 @@ class PaymentHoodHandler
         // Fetch credentials as stored in tblpaymentgateways.
         $rows = Capsule::table('tblpaymentgateways')
             ->where('gateway', 'paymenthood')
-            ->whereIn('setting', [$appIdSetting, $tokenSetting, 'webhookToken'])
+            ->whereIn('setting', [$appIdSetting, $tokenSetting, 'webhookToken', 'licenseId'])
             ->get()
             ->keyBy('setting');
 
         $appId = isset($rows[$appIdSetting]) ? $rows[$appIdSetting]->value : null;
         $token = isset($rows[$tokenSetting]) ? $rows[$tokenSetting]->value : null;
         $webhookToken = isset($rows['webhookToken']) ? $rows['webhookToken']->value : null;
-        return ['appId' => $appId, 'token' => $token, 'webhookToken' => $webhookToken, 'useSandbox' => $useSandbox];
+        $licenseId = isset($rows['licenseId']) ? $rows['licenseId']->value : null;
+        return ['appId' => $appId, 'token' => $token, 'webhookToken' => $webhookToken, 'licenseId' => $licenseId, 'useSandbox' => $useSandbox];
     }
 
     public static function getSystemUrl()
