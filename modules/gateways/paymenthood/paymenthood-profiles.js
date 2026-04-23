@@ -58,19 +58,8 @@
     }
     // ────────────────────────────────────────────────────────────────────
 
-    // Send logs to server instead of browser console
-    function logToServer(action, request, response) {
-        fetch(ajaxUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                logClient: true,
-                action: action,
-                request: request || {},
-                response: response || {}
-            })
-        }).catch(function() {});
-    }
+    // Logging to server is disabled; function kept as no-op to avoid call-site changes.
+    function logToServer(action, request, response) {}
 
     function getSelectedPaymentMethod() {
         // Prefer real radio selection. If radios exist but none are checked yet,

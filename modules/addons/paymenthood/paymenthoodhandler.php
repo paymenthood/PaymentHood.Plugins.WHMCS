@@ -5,11 +5,6 @@ if (!defined("WHMCS")) {
     die("This file cannot be accessed directly");
 }
 
-if (defined('WHMCS_MAIL') && WHMCS_MAIL) {
-    // Skip API call — email generation context
-    return '<a href="#">Pay with paymentHood</a>';
-}
-
 class PaymentHoodAppInactiveException extends \RuntimeException
 {
     /** @var string|null */
@@ -226,105 +221,129 @@ class PaymentHoodHandler
         $tax2 = $invoice ? self::toMoney($invoice->tax2 ?? 0) : 0.0;
         $credit = $invoice ? self::toMoney($invoice->credit ?? 0) : 0.0;
         $invoiceTotal = $invoice ? self::toMoney($invoice->total ?? 0) : 0.0;
-        $total = $invoiceTotal > 0 ? $invoiceTotal : self::toMoney($amount);
         $totalTax = $tax1 + $tax2;
 
-        $expected = $subtotal + $totalTax;
-        $discount = 0.0;
-        if ($credit > 0) {
+        // PaymentHood validates: apiTotal + totalTax + shipping + handling - discount - shippingDiscount == paymentAmount
+        // WHMCS invoice: invoiceTotal = subtotal + totalTax - credit
+        //                subtotal      + totalTax            - credit  == paymentAmount ✓
+        // So apiTotal = subtotal (pre-tax), totalTax separate, discount = credit.
+        $hasTax = $totalTax > 0.0;
+        if ($invoice) {
+            $apiTotal = $subtotal;
             $discount = $credit;
-        } elseif ($expected > 0 && $total >= 0 && $expected > $total) {
-            $discount = $expected - $total;
+        } else {
+            // No invoice breakdown — flat charge with no tax/discount split.
+            $apiTotal = self::toMoney($amount);
+            $discount = 0.0;
+            $hasTax   = false;
+            $totalTax = 0.0;
         }
 
-        $customerOrder['amount'] = [
-            'total' => $total,
-            'handling' => 0,
-            'insurance' => 0,
-            'discount' => $discount,
-            'shipping' => 0,
+        // Only include totalTax when > 0; sending 0 (not null) triggers PaymentHood's
+        // per-item tax checks even when there is no tax to distribute.
+        $amountPayload = [
+            'total'            => $apiTotal,
+            'handling'         => 0,
+            'insurance'        => 0,
+            'discount'         => $discount > 0.0 ? $discount : 0,
+            'shipping'         => 0,
             'shippingDiscount' => 0,
-            'totalTax' => $totalTax,
         ];
+        if ($hasTax) {
+            $amountPayload['totalTax'] = $totalTax;
+        }
+        $customerOrder['amount'] = $amountPayload;
 
-        // Build items from invoice items when available
+        // Build items from invoice lines when available.
+        // ValidateAmount rules (only enforced when Items is non-null):
+        //   • If TotalTax != null → every item.Tax must be non-null, Sum(item.Tax × qty) = TotalTax
+        //   • Sum((item.Amount + item.Tax) × qty) = Total + TotalTax
         $items = [];
-        if ($invoiceId > 0) {
+        if ($invoiceId > 0 && $invoice) {
             try {
                 $invoiceItems = Capsule::table('tblinvoiceitems')
                     ->where('invoiceid', $invoiceId)
                     ->orderBy('id', 'asc')
                     ->get();
-                $runningAllocated = 0.0;
 
-                foreach ($invoiceItems as $idx => $ii) {
-                    $desc = is_string($ii->description ?? null) ? trim((string) $ii->description) : '';
+                // Pre-compute taxable subtotal for proportional tax allocation.
+                $taxableSubtotal = 0.0;
+                foreach ($invoiceItems as $ii) {
+                    if ((string) ($ii->taxed ?? '') === '1') {
+                        $taxableSubtotal += self::toMoney($ii->amount ?? 0);
+                    }
+                }
+
+                $builtItems   = [];
+                $taxAllocated = 0.0;
+                $lastTaxedIdx = -1;
+
+                foreach ($invoiceItems as $ii) {
+                    $desc       = is_string($ii->description ?? null) ? trim((string) $ii->description) : '';
                     $lineAmount = self::toMoney($ii->amount ?? 0);
-                    $type = is_string($ii->type ?? null) ? trim((string) $ii->type) : '';
-                    $relid = (int) ($ii->relid ?? 0);
+                    $type       = is_string($ii->type ?? null) ? trim((string) $ii->type) : '';
+                    $relid      = (int) ($ii->relid ?? 0);
 
                     if ($desc === '' && $lineAmount == 0.0) {
                         continue;
                     }
 
-                    $item = [
-                        'name' => ($desc !== '' ? $desc : ($type !== '' ? $type : 'Item')),
-                        'description' => '',
-                        'currency' => ($currency !== '' ? $currency : null),
-                        'amount' => $lineAmount,
-                        'quantity' => 1,
-                        'tax' => 0,
-                        'sku' => ($type !== '' && $relid > 0) ? ($type . ':' . $relid) : '',
-                    ];
+                    // Tax is always present on every item (0 when not taxed) because
+                    // PaymentHood rejects the payload if any item.Tax is null while
+                    // Amount.TotalTax is non-null.
+                    $taxForItem = 0.0;
+                    if ($hasTax && (string) ($ii->taxed ?? '') === '1' && $taxableSubtotal > 0.0) {
+                        $taxForItem    = round(($lineAmount / $taxableSubtotal) * $totalTax, 2);
+                        $taxAllocated += $taxForItem;
+                        $lastTaxedIdx  = count($builtItems);
+                    }
 
-                    // Category (best-effort)
-                    $category = null;
+                    // Category mapping (PaymentProviderCustomerOrderItemCategory).
                     $typeLower = strtolower($type);
-                    if ($typeLower === 'domain' || $typeLower === 'hosting' || $typeLower === 'addon' || $typeLower === 'upgrade') {
+                    if (in_array($typeLower, ['domain', 'hosting', 'addon', 'upgrade'], true)) {
                         $category = 'DigitalGoods';
                     } elseif ($typeLower === 'addfunds') {
                         $category = 'Service';
-                    }
-                    if ($category !== null) {
-                        $item['category'] = $category;
-                    }
-
-                    // Remove null currency key if unknown
-                    if ($item['currency'] === null) {
-                        unset($item['currency']);
+                    } else {
+                        $category = 'DigitalGoods'; // safest default for WHMCS
                     }
 
-                    // Allocate tax proportionally when possible
-                    $isTaxed = (string) ($ii->taxed ?? '') === '1';
-                    if ($isTaxed && $subtotal > 0 && $totalTax > 0 && $lineAmount > 0) {
-                        $allocated = round(($lineAmount / $subtotal) * $totalTax, 2);
-                        $runningAllocated += $allocated;
-                        $item['tax'] = $allocated;
+                    $item = [
+                        'name'        => ($desc !== '' ? $desc : ($type !== '' ? $type : 'Item')),
+                        'description' => '',
+                        'amount'      => $lineAmount,
+                        'quantity'    => 1,
+                        'tax'         => $taxForItem,
+                        'sku'         => ($type !== '' && $relid > 0) ? ($type . ':' . $relid) : '',
+                        'category'    => $category,
+                    ];
+
+                    if ($currency !== '') {
+                        $item['currency'] = $currency;
                     }
 
-                    $items[] = $item;
+                    $builtItems[] = $item;
                 }
 
-                // Fix rounding remainder by adjusting last taxed item
-                if ($totalTax > 0 && !empty($items)) {
-                    $remainder = round($totalTax - $runningAllocated, 2);
+                // Fix rounding so Sum(item.Tax × qty) == totalTax exactly.
+                if ($hasTax && $lastTaxedIdx >= 0) {
+                    $remainder = round($totalTax - $taxAllocated, 2);
                     if (abs($remainder) >= 0.01) {
-                        for ($j = count($items) - 1; $j >= 0; $j--) {
-                            if (!empty($items[$j]['tax'])) {
-                                $items[$j]['tax'] = round(((float) $items[$j]['tax']) + $remainder, 2);
-                                break;
-                            }
-                        }
+                        $builtItems[$lastTaxedIdx]['tax'] = round(
+                            (float) $builtItems[$lastTaxedIdx]['tax'] + $remainder,
+                            2
+                        );
                     }
                 }
+
+                $items = $builtItems;
             } catch (\Throwable $e) {
-                // ignore invoice items
+                $items = [];
             }
         }
 
         if (!empty($items)) {
-            $customerOrder['items'] = $items;
-            // Description as first item name (best-effort)
+            $customerOrder['items'] = array_values($items);
             if (!isset($customerOrder['description']) && isset($items[0]['name'])) {
                 $customerOrder['description'] = (string) $items[0]['name'];
             }
@@ -836,6 +855,38 @@ class PaymentHoodHandler
         }
     }
 
+    private static function ensureInvoiceFunctionsLoaded(): void
+    {
+        if (!function_exists('addInvoicePayment') && defined('ROOTDIR')) {
+            $invoiceFunctionsPath = ROOTDIR . '/includes/invoicefunctions.php';
+            if (is_file($invoiceFunctionsPath)) {
+                require_once $invoiceFunctionsPath;
+            }
+        }
+    }
+
+    public static function recordInvoicePayment(
+        int $invoiceId,
+        ?string $transactionId,
+        $amount,
+        $fee = 0.0,
+        string $gateway = self::PAYMENTHOOD_GATEWAY
+    ): void {
+        self::ensureInvoiceFunctionsLoaded();
+
+        if (!function_exists('addInvoicePayment')) {
+            throw new \RuntimeException('WHMCS addInvoicePayment() is not available in the current context.');
+        }
+
+        addInvoicePayment(
+            $invoiceId,
+            $transactionId ?: '',
+            self::toMoney($amount),
+            self::toMoney($fee),
+            $gateway
+        );
+    }
+
     public static function handleInvoice(array $params)
     {
         $appId = null;
@@ -894,11 +945,15 @@ class PaymentHoodHandler
 
                     self::safeLogModuleCall('handler_invoice_order_search', [
                         'invoiceId' => $invoiceId,
-                        'clientId' => $clientId
+                        'clientId'  => $clientId,
+                        '_note'     => "Invoice #$invoiceId has no linked order. Searching for an unlinked (orphan) order for client #$clientId to associate with this invoice.",
                     ], [
-                        'orphanOrderFound' => $orphanOrder ? true : false,
-                        'orphanOrderId' => $orphanOrder ? $orphanOrder->id : null,
-                        'orphanOrderPaymentMethod' => $orphanOrder ? $orphanOrder->paymentmethod : null
+                        'orphanOrderFound'          => $orphanOrder ? 1 : 0,
+                        'orphanOrderId'             => $orphanOrder ? $orphanOrder->id : null,
+                        'orphanOrderPaymentMethod'  => $orphanOrder ? $orphanOrder->paymentmethod : null,
+                        '_result'                   => $orphanOrder
+                            ? "Found orphan order #{$orphanOrder->id} (method: {$orphanOrder->paymentmethod}) — will be linked to invoice #$invoiceId."
+                            : "No orphan order found for client #$clientId. A new order will be created and linked to invoice #$invoiceId.",
                     ]);
 
                     if ($orphanOrder) {
@@ -914,10 +969,13 @@ class PaymentHoodHandler
                         $orderId = $orphanOrder->id;
 
                         self::safeLogModuleCall('handler_invoice_order_linked', [
-                            'invoiceId' => $invoiceId,
-                            'orderId' => $orderId,
-                            'orphanOrderId' => $orphanOrder->id
-                        ], []);
+                            'invoiceId'     => $invoiceId,
+                            'orderId'       => $orderId,
+                            'orphanOrderId' => $orphanOrder->id,
+                            '_note'         => "Orphan order #$orderId was unlinked. It has now been associated with invoice #$invoiceId and its payment method set to PaymentHood.",
+                        ], [
+                            '_result' => "Order #$orderId is now linked to invoice #$invoiceId. Customer will be redirected to checkout.",
+                        ]);
                     } else {
                         // Generate order number using WHMCS function
                         $orderNumber = Capsule::table('tblorders')->max('ordernum') + 1;
@@ -935,10 +993,13 @@ class PaymentHoodHandler
                         ]);
 
                         self::safeLogModuleCall('handler_invoice_order_created', [
-                            'invoiceId' => $invoiceId,
-                            'orderId' => $orderId,
-                            'orderNumber' => $orderNumber
-                        ], []);
+                            'invoiceId'   => $invoiceId,
+                            'orderId'     => $orderId,
+                            'orderNumber' => $orderNumber,
+                            '_note'       => "No existing order found for invoice #$invoiceId. A new pending order #$orderId (order number: $orderNumber) has been created and linked to this invoice.",
+                        ], [
+                            '_result' => "New order #$orderId created and linked to invoice #$invoiceId. Customer will be redirected to checkout.",
+                        ]);
                     }
                 }
             }
@@ -949,7 +1010,8 @@ class PaymentHoodHandler
                     'clientid' => $clientId,
                     'paymentmethod' => self::PAYMENTHOOD_GATEWAY,
                     'status' => 'Pending',
-                    'sendemail' => false,
+                    'sendemail' => true,
+                    'sendinvoice' => true,
                     'notes' => 'Created by PaymentHood gateway',
                     'pid' => array_column($cartProducts, 'pid'),
                     'qty' => array_column($cartProducts, 'qty'),
@@ -970,37 +1032,52 @@ class PaymentHoodHandler
                 }
             }
 
-            // Check invoice age to detect checkout flow
-            $invoiceAge = 0;
-            if ($invoiceId) {
-                $invoiceDate = Capsule::table('tblinvoices')->where('id', $invoiceId)->value('date');
-                if ($invoiceDate) {
-                    $invoiceAge = time() - strtotime($invoiceDate);
-                }
+            // Detect if the customer is landing back from a PaymentHood attempt
+            // (success, failure, cancel, pending) — in those cases show the UI,
+            // don't loop them back to PaymentHood immediately.
+            $returningFromGateway = !empty($_GET['paymentsuccess'])
+                || !empty($_GET['paymentfailed'])
+                || !empty($_GET['paymentcancelled'])
+                || !empty($_GET['paymentpending']);
+
+            // Fetch invoice status for the redirect decision.
+            $invoiceStatus = '';
+            if ($isInvoicePayment) {
+                $invoiceStatus = (string) (Capsule::table('tblinvoices')
+                    ->where('id', $invoiceId)
+                    ->value('status') ?? '');
             }
 
-            // Decide if we should redirect to PaymentHood
-            // Redirect when:
-            // 1. User explicitly submitted payment form (POST with paymentmethod)
-            // 2. Invoice just created (< 60 seconds) - coming from checkout flow
+            // Determine whether we are on the billing invoice detail page (viewinvoice.php).
+            // On that page we must NEVER auto-redirect — the customer must see the invoice
+            // and explicitly click Pay. Auto-redirect only applies to the checkout flow
+            // (cart confirmation page, etc.) where the customer has already committed.
+            $isViewInvoicePage = basename($_SERVER['SCRIPT_NAME'] ?? '') === 'viewinvoice.php';
+
+            // Redirect to PaymentHood when:
+            // 1. Customer explicitly submitted the payment form (POST with paymentmethod=paymenthood)
+            //    — covers both the invoice Pay button and the cart checkout submit.
+            // 2. Customer is in the checkout flow (not on viewinvoice.php), invoice is Unpaid,
+            //    and they are not returning from a previous gateway attempt.
             $shouldRedirect = (
                 ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['paymentmethod'] ?? '') === self::PAYMENTHOOD_GATEWAY) ||
-                ($isInvoicePayment && $invoiceAge > 0 && $invoiceAge < 60)
+                (!$isViewInvoicePage && $isInvoicePayment && $invoiceStatus === 'Unpaid' && !$returningFromGateway)
             );
-
-            self::safeLogModuleCall('handler_redirect_decision', [
-                'invoiceId' => $invoiceId,
-                'invoiceAge' => $invoiceAge,
-                'isInvoicePayment' => $isInvoicePayment,
-                'requestMethod' => $_SERVER['REQUEST_METHOD']
-            ], [
-                'shouldRedirect' => $shouldRedirect
-            ]);
 
             if ($shouldRedirect) {
                 $amount = $params['amount'];
                 $currency = $params['currency'];
                 $clientEmail = $params['clientdetails']['email'] ?? '';
+
+                // Return cached redirectUrl immediately if this invoice already has
+                // a hosted-page session — prevents duplicate referenceId API errors
+                // when WHMCS calls paymenthood_link() more than once per request.
+                $sessionCacheKey = 'paymenthood_redirect_' . $invoiceId;
+                $cachedRedirectUrl = $_SESSION[$sessionCacheKey] ?? null;
+                if (!empty($cachedRedirectUrl)) {
+                    return '<style>html,body{display:none!important}</style>'
+                        . '<script>window.location.replace(' . json_encode($cachedRedirectUrl) . ');</script>';
+                }
 
                 // Check if invoice contains any recurring/subscription items
                 $hasRecurringItem = false;
@@ -1012,12 +1089,6 @@ class PaymentHoodHandler
                         ->whereNotIn('h.billingcycle', ['One Time', 'Free', ''])
                         ->exists();
                 }
-
-                self::safeLogModuleCall('handler_check_recurring_items', [
-                    'invoiceId' => $invoiceId
-                ], [
-                    'hasRecurringItem' => $hasRecurringItem
-                ]);
 
                 $callbackUrl = rtrim(self::getSystemUrl(), '/') . '/modules/gateways/callback/paymenthood.php?invoiceid=' . $invoiceId;
 
@@ -1038,11 +1109,6 @@ class PaymentHoodHandler
                 $selectedProfileId = $_SESSION['paymenthood_profile_id'] ?? null;
                 if (!empty($selectedProfileId) && $selectedProfileId !== 'creditcard') {
                     $postData['paymentProfileId'] = (string) $selectedProfileId;
-                    self::safeLogModuleCall('handler_selected_profile', [
-                        'invoiceId' => $invoiceId,
-                    ], [
-                        'paymentProfileId' => $selectedProfileId,
-                    ]);
                 }
 
                 try {
@@ -1061,11 +1127,13 @@ class PaymentHoodHandler
                 }
                 self::safeLogModuleCall('handler_payment_created', [
                     'invoiceId' => $invoiceId,
-                    'amount' => $amount,
-                    'currency' => $currency
+                    'amount'    => $amount,
+                    'currency'  => $currency,
+                    '_note'     => "PaymentHood hosted checkout session created for invoice #$invoiceId ($amount $currency). Customer is now being redirected to the PaymentHood checkout page.",
                 ], [
+                    'paymentId'   => $response['paymentId'] ?? null,
                     'redirectUrl' => $response['redirectUrl'] ?? null,
-                    'paymentId' => $response['paymentId'] ?? null
+                    '_result'     => 'Customer redirected to PaymentHood. Waiting for payment completion or webhook callback.',
                 ]);
 
                 if (empty($response['redirectUrl'])) {
@@ -1080,9 +1148,19 @@ class PaymentHoodHandler
                     self::appendInvoiceNoteIfMissing((int) $invoiceId, '[PaymentHood Sandbox]', $noteLine);
                 }
 
-                // Redirect immediately to PaymentHood
-                header('Location: ' . $response['redirectUrl']);
-                exit;
+                // Store the redirectUrl in session so any subsequent render of
+                // paymenthood_link() for the same invoice reuses it instead of
+                // making a second hosted-page API call (which PaymentHood rejects
+                // as a duplicate referenceId).
+                $_SESSION[$sessionCacheKey] = $response['redirectUrl'];
+
+                // Cannot use header()+exit — that kills WHMCS before it sends
+                // checkout emails (Order Confirmation, Customer Invoice, New Order
+                // Notification). Instead, hide the entire page immediately via CSS
+                // and redirect via JS. The user sees nothing; PHP completes normally
+                // so WHMCS finishes sending all emails.
+                return '<style>html,body{display:none!important}</style>'
+                    . '<script>window.location.replace(' . json_encode($response['redirectUrl']) . ');</script>';
             }
 
             // Initial render: show Pay button UI
@@ -1191,7 +1269,9 @@ class PaymentHoodHandler
 
     public static function processUnpaidInvoices()
     {
-        self::safeLogModuleCall('handler_cron_unpaid_invoices_start', [], []);
+        self::safeLogModuleCall('handler_cron_unpaid_invoices_start', [], [
+            '_note' => 'PaymentHood cron job started. Scanning for unpaid renewal invoices (due today) to auto-charge via saved payment profiles.',
+        ]);
 
         // Check if PaymentHood gateway is activated
         $activated = Capsule::table('tblpaymentgateways')
@@ -1262,18 +1342,20 @@ class PaymentHoodHandler
                                     'transactionId' => $result['paymentId']
                                 ]);
                             } else {
-                                $command = 'UpdateInvoice';
-                                $postData = [
-                                    'invoiceid' => $invoiceId,
-                                    'status' => 'Paid',
-                                ];
-                                $results = localAPI($command, $postData);
+                                self::recordInvoicePayment(
+                                    (int) $invoiceId,
+                                    isset($result['paymentId']) ? (string) $result['paymentId'] : null,
+                                    $invoice->total,
+                                    0,
+                                    self::PAYMENTHOOD_GATEWAY
+                                );
 
-                                if ($results['result'] === 'success') {
-                                    self::safeLogModuleCall('Invoice marked as paid', ['invoiceId' => $invoiceId], $results);
-                                } else {
-                                    self::safeLogModuleCall('Failed to mark invoice as paid', ['invoiceId' => $invoiceId], $results);
-                                }
+                                self::safeLogModuleCall('Invoice payment recorded', [
+                                    'invoiceId' => $invoiceId,
+                                    'transactionId' => $result['paymentId'] ?? null,
+                                ], [
+                                    'gateway' => self::PAYMENTHOOD_GATEWAY,
+                                ]);
                             }
                         } catch (\Exception $apiEx) {
                             self::safeLogModuleCall('Error updating invoice to paid', ['invoiceId' => $invoiceId], ['error' => $apiEx->getMessage()]);

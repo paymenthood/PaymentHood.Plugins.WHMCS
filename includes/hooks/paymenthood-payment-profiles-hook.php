@@ -20,26 +20,13 @@ add_hook('ClientAreaHeadOutput', 1, function ($vars) {
         $filename = $_SERVER['PHP_SELF'] ?? '';
         $requestUri = $_SERVER['REQUEST_URI'] ?? '';
 
-        PaymentHoodHandler::safeLogModuleCall('hook_execution_start', [
-            'filename' => $filename,
-            'requestUri' => $requestUri,
-            'gateway' => $gateway
-        ], []);
-
         if (
             strpos($filename, 'cart.php') === false
             && strpos($filename, 'checkout') === false
             && strpos($filename, 'viewinvoice.php') === false
         ) {
-            PaymentHoodHandler::safeLogModuleCall('hook_skipped_wrong_page', [
-                'filename' => $filename
-            ], []);
             return '';
         }
-
-        PaymentHoodHandler::safeLogModuleCall('hook_proceeding', [
-            'filename' => $filename
-        ], []);
 
         // Get gateway settings including checkout message
         // WHMCS may normalize gateway setting keys to lowercase in some contexts/versions.
@@ -102,58 +89,6 @@ add_hook('ClientAreaHeadOutput', 1, function ($vars) {
             $checkoutMessage = '';
         }
 
-        // Minimal debug to help diagnose missing message without logging the content
-        $debug = [
-            'source' => $checkoutMessageSource,
-            'length' => strlen($checkoutMessage),
-            'isEmpty' => ($checkoutMessage === ''),
-            'hasGetGatewayVariables' => $hasGetGatewayVariables,
-            'gatewayVarKeys' => array_values(array_unique(array_map('strval', array_keys($gatewayParams)))),
-        ];
-
-        // Only log when we're missing the stored value (or falling back), to reduce noise.
-        $shouldLog = ($checkoutMessageSource === 'fallback.configDefault' || $checkoutMessageSource === 'empty');
-
-        // If still empty, log what settings exist for this gateway (names + ids only)
-        if ($shouldLog && $checkoutMessage === '') {
-            try {
-                $rows = Capsule::table('tblpaymentgateways')
-                    ->select(['id', 'gateway', 'setting', 'value'])
-                    ->whereRaw('TRIM(LOWER(gateway)) = ?', [strtolower($gateway)])
-                    ->orderBy('id', 'asc')
-                    ->get();
-
-                $sensitive = function ($settingName) {
-                    $s = strtolower((string) $settingName);
-                    return (strpos($s, 'token') !== false)
-                        || (strpos($s, 'secret') !== false)
-                        || (strpos($s, 'password') !== false)
-                        || (strpos($s, 'key') !== false)
-                        || (strpos($s, 'authorization') !== false);
-                };
-
-                $settingsSummary = [];
-                foreach ($rows as $r) {
-                    $isSensitive = $sensitive($r->setting ?? '');
-                    $settingsSummary[] = [
-                        'id' => (int) ($r->id ?? 0),
-                        'setting' => (string) ($r->setting ?? ''),
-                        'len' => $isSensitive ? null : strlen((string) ($r->value ?? '')),
-                        'redacted' => $isSensitive,
-                    ];
-                }
-
-                $debug['dbRowCount'] = count($settingsSummary);
-                $debug['dbSettings'] = $settingsSummary;
-            } catch (\Throwable $e) {
-                $debug['dbInspectError'] = $e->getMessage();
-            }
-        }
-
-        if ($shouldLog) {
-            PaymentHoodHandler::safeLogModuleCall('checkout_message_resolve', [], $debug);
-        }
-
         // Get base URL for AJAX endpoint
         $systemUrl = rtrim(\WHMCS\Config\Setting::getValue('SystemURL'), '/');
         $ajaxUrl = $systemUrl . '/modules/gateways/' . rawurlencode($gateway) . '/get-payment-profiles.php';
@@ -173,13 +108,7 @@ add_hook('ClientAreaHeadOutput', 1, function ($vars) {
             'templateUrl' => $templateUrl,
         ]);
 
-        PaymentHoodHandler::safeLogModuleCall('hook_returning_html', [
-            'ajaxUrl' => $ajaxUrl,
-            'iconProxyBase' => $iconProxyBase,
-            'checkoutMessageLength' => strlen($checkoutMessage)
-        ], []);
-
-        return '<link rel="stylesheet" href="' . htmlspecialchars($cssUrl) . '">'
+        return '<link rel="stylesheet" href="' . htmlspecialchars($cssUrl) . '">'  
             . '<script>window.PAYMENTHOOD_CONFIG=' . $jsConfig . ';</script>'
             . '<script src="' . htmlspecialchars($jsUrl) . '"></script>';
 

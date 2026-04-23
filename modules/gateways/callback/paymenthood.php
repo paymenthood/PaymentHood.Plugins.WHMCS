@@ -14,31 +14,218 @@ error_reporting(E_ALL);
 
 define('PAYMENTHOOD_GATEWAY', 'paymenthood');
 
+function paymenthood_resolveEmailTemplate(array $preferredNames, callable $fallbackMatcher): array
+{
+    $result = [
+        'name' => null,
+        'candidates' => [],
+    ];
+
+    try {
+        $existingNames = Capsule::table('tblemailtemplates')
+            ->pluck('name')
+            ->filter(function ($name) {
+                return is_string($name) && trim($name) !== '';
+            })
+            ->map(function ($name) {
+                return trim((string) $name);
+            })
+            ->values()
+            ->all();
+
+        $result['candidates'] = $existingNames;
+
+        foreach ($preferredNames as $preferredName) {
+            foreach ($existingNames as $existingName) {
+                if (strcasecmp($existingName, $preferredName) === 0) {
+                    $result['name'] = $existingName;
+                    return $result;
+                }
+            }
+        }
+
+        foreach ($existingNames as $existingName) {
+            if ($fallbackMatcher($existingName)) {
+                $result['name'] = $existingName;
+                return $result;
+            }
+        }
+    } catch (\Throwable $e) {
+        $result['candidates'] = [];
+    }
+
+    return $result;
+}
+
+function paymenthood_resolveRecurringFailureTemplate(): array
+{
+    return paymenthood_resolveEmailTemplate(
+        [
+            'Invoice Payment Failed',
+            'Credit Card Payment Failed',
+        ],
+        function ($existingName) {
+            $lowerName = strtolower((string) $existingName);
+            return strpos($lowerName, 'payment') !== false && strpos($lowerName, 'failed') !== false;
+        }
+    );
+}
+
+function paymenthood_resolveCancelledFailureTemplate(): array
+{
+    return paymenthood_resolveEmailTemplate(
+        [
+            'Order Cancelled',
+            'Order Cancellation Confirmation',
+            'Invoice Cancelled',
+            'Payment Cancelled',
+        ],
+        function ($existingName) {
+            $lowerName = strtolower((string) $existingName);
+            $hasCancel = strpos($lowerName, 'cancel') !== false;
+            $hasOrderOrInvoice = strpos($lowerName, 'order') !== false || strpos($lowerName, 'invoice') !== false;
+            return $hasCancel && $hasOrderOrInvoice;
+        }
+    );
+}
+
+function paymenthood_sendInvoiceEmail(int $invoiceId, array $template): array
+{
+    $result = [
+        'sent' => false,
+        'method' => null,
+        'error' => null,
+        'details' => [],
+    ];
+
+    if ($invoiceId <= 0) {
+        $result['error'] = 'Invalid invoice ID';
+        return $result;
+    }
+
+    $templateName = $template['name'];
+    $result['details']['availableTemplates'] = $template['candidates'];
+    $result['details']['templateName'] = $templateName;
+
+    if (!$templateName) {
+        $result['error'] = 'No payment failure email template found in tblemailtemplates';
+        return $result;
+    }
+
+    if (!function_exists('sendMessage') && defined('ROOTDIR')) {
+        $candidateFiles = [
+            ROOTDIR . '/includes/functions.php',
+            ROOTDIR . '/includes/clientfunctions.php',
+        ];
+
+        foreach ($candidateFiles as $candidateFile) {
+            if (is_file($candidateFile)) {
+                require_once $candidateFile;
+                if (function_exists('sendMessage')) {
+                    break;
+                }
+            }
+        }
+    }
+
+    if (function_exists('sendMessage')) {
+        try {
+            $sendMessageResult = sendMessage($templateName, $invoiceId);
+            $result['sent'] = (bool) $sendMessageResult;
+            $result['method'] = 'sendMessage';
+            $result['details']['returnValue'] = $sendMessageResult;
+
+            if ($result['sent']) {
+                return $result;
+            }
+
+            $result['error'] = 'sendMessage returned false';
+        } catch (\Throwable $e) {
+            $result['method'] = 'sendMessage';
+            $result['error'] = $e->getMessage();
+        }
+    }
+
+    try {
+        $adminUser = Capsule::table('tbladmins')
+            ->where('disabled', 0)
+            ->orderBy('id', 'asc')
+            ->value('username');
+
+        $result['details']['adminUser'] = $adminUser;
+
+        if (!$adminUser) {
+            if ($result['error'] === null) {
+                $result['error'] = 'No active admin found for SendEmail fallback';
+            }
+            return $result;
+        }
+
+        $emailResult = localAPI('SendEmail', [
+            'messagename' => $templateName,
+            'id' => $invoiceId,
+        ], $adminUser);
+
+        $result['sent'] = (($emailResult['result'] ?? '') === 'success');
+        $result['method'] = 'localAPI';
+        $result['details']['localApiResult'] = $emailResult;
+
+        if (!$result['sent']) {
+            $result['error'] = $emailResult['message'] ?? 'localAPI SendEmail failed';
+        }
+    } catch (\Throwable $e) {
+        $result['method'] = 'localAPI';
+        $result['error'] = $e->getMessage();
+    }
+
+    return $result;
+}
+
+function paymenthood_sendRecurringFailureEmail(int $invoiceId): array
+{
+    return paymenthood_sendInvoiceEmail($invoiceId, paymenthood_resolveRecurringFailureTemplate());
+}
+
+function paymenthood_sendCancelledFailureEmail(int $invoiceId): array
+{
+    return paymenthood_sendInvoiceEmail($invoiceId, paymenthood_resolveCancelledFailureTemplate());
+}
+
+function paymenthood_isRecurringRenewalInvoice(int $invoiceId): bool
+{
+    if ($invoiceId <= 0) {
+        return false;
+    }
+
+    try {
+        return Capsule::table('tblinvoices as i')
+            ->join('tblinvoiceitems as ii', 'ii.invoiceid', '=', 'i.id')
+            ->join('tblhosting as h', 'ii.relid', '=', 'h.id')
+            ->where('i.id', $invoiceId)
+            ->where('ii.type', 'Hosting')
+            ->whereNotIn('h.billingcycle', ['One Time', 'Free', ''])
+            ->whereColumn('i.duedate', '=', 'h.nextduedate')
+            ->exists();
+    } catch (\Throwable $e) {
+        return false;
+    }
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Log raw input first
     $rawInput = file_get_contents('php://input');
-    PaymentHoodHandler::safeLogModuleCall('callback_webhook_post_received', [], [
-        'raw_input_length' => strlen($rawInput)
-    ]);
 
     try {
         $json = json_decode($rawInput, true);
 
-        // Log JSON decode errors
         if (json_last_error() !== JSON_ERROR_NONE) {
             PaymentHoodHandler::safeLogModuleCall('callback_webhook_json_parse_error', [], [
                 'error' => json_last_error_msg(),
-                'raw_input' => substr($rawInput, 0, 500)
             ]);
             http_response_code(400);
             echo json_encode(['error' => 'Invalid JSON: ' . json_last_error_msg()]);
             exit;
         }
-
-        PaymentHoodHandler::safeLogModuleCall('callback_webhook_post_parsed', [
-            'referenceId' => $json['payment']['referenceId'] ?? null,
-            'paymentState' => $json['payment']['paymentState'] ?? null
-        ], []);
 
         $referenceId = $json['payment']['referenceId'] ?? null;
         if (!$referenceId) {
@@ -52,9 +239,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         processPaymenthoodCallback($referenceId, true);
 
-        PaymentHoodHandler::safeLogModuleCall('callback_webhook_post_completed', [
-            'referenceId' => $referenceId
-        ], []);
         http_response_code(200);
         echo json_encode(['status' => 'success', 'message' => 'Webhook processed']);
         exit;
@@ -72,22 +256,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     $referenceId = $_GET['invoiceid'] ?? null;
-    PaymentHoodHandler::safeLogModuleCall('callback_webhook_get_received', [
-        'referenceId' => $referenceId
-    ], []);
     if (!$referenceId) {
-        PaymentHoodHandler::safeLogModuleCall('callback_webhook_get_missing_reference', [], [
-            'error' => 'Missing invoiceId parameter'
-        ]);
         die('Missing invoiceId');
     }
 
-    // processPaymenthoodCallback handles the redirect internally, so no need for additional redirect here
     processPaymenthoodCallback($referenceId, false);
-    // If we reach here, something went wrong - processPaymenthoodCallback should have exited
-    PaymentHoodHandler::safeLogModuleCall('callback_webhook_get_unexpected_fallthrough', [
-        'referenceId' => $referenceId
-    ], []);
     exit;
 }
 
@@ -99,12 +272,6 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
     $webhookToken = $credentials['webhookToken'];
 
     if (!$appId || !$token || !$webhookToken) {
-        PaymentHoodHandler::safeLogModuleCall('callback_missing_configuration', [], [
-            'appId' => $appId ? 'configured' : 'missing',
-            'token' => $token ? 'configured' : 'missing',
-            'webhookToken' => $webhookToken ? 'configured' : 'missing',
-            'error' => 'Gateway not fully configured'
-        ]);
         die('Payment gateway not configured');
     }
 
@@ -132,14 +299,6 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
     $error = curl_error($curl);
     curl_close($curl);
 
-    PaymentHoodHandler::safeLogModuleCall('callback_payment_status_check', [
-        'invoiceId' => $invoiceId,
-        'url' => $url
-    ], [
-        'httpCode' => $httpCode,
-        'error' => $error ?: null
-    ]);
-
     if (!$response || $httpCode >= 400) {
         die('Error communicating with payment gateway');
     }
@@ -150,15 +309,6 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
 
     // Extract fee from feeBreakdown (appFee + providerFee)
     $totalFee = PaymentHoodHandler::extractTotalFee($data);
-
-    PaymentHoodHandler::safeLogModuleCall('callback_fee_extracted', [
-        'invoiceId' => $invoiceId,
-        'transactionId' => $transactionId,
-    ], [
-        'appFee' => $data['feeBreakdown']['appFee'] ?? null,
-        'providerFee' => $data['feeBreakdown']['providerFee'] ?? null,
-        'totalFee' => $totalFee,
-    ]);
 
     // Extract and store provider name if available
     $providerName = null;
@@ -175,6 +325,19 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
         !empty($providerName) ? (string) $providerName : ''
     );
 
+    // Log the resolved payment state so the full lifecycle is visible in the gateway log.
+    $callbackSource = ($_SERVER['REQUEST_METHOD'] === 'POST') ? 'webhook (POST)' : 'browser return (GET)';
+    PaymentHoodHandler::safeLogModuleCall('callback_payment_state_received', [
+        'invoiceId' => $invoiceId,
+        'source'    => $callbackSource,
+        '_note'     => "PaymentHood callback received for invoice #$invoiceId via $callbackSource. Payment state has been resolved from the PaymentHood API.",
+    ], [
+        'paymentState'  => $paymentState,
+        'transactionId' => $transactionId !== 'N/A' ? $transactionId : null,
+        'amount'        => $data['amount'] ?? null,
+        'provider'      => $providerName,
+        '_result'       => "Payment is currently in '$paymentState' state.",
+    ]);
 
     // Store provider in transaction description if we have both transaction ID and provider
     if ($providerName && $transactionId !== 'N/A') {
@@ -185,13 +348,7 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
                 'description' => "PaymentHood - {$providerName}"
             ]);
 
-            PaymentHoodHandler::safeLogModuleCall('callback_provider_stored', [
-                'invoiceId' => $invoiceId,
-                'transactionId' => $transactionId,
-                'provider' => $providerName
-            ], [
-                'success' => ($result['result'] ?? '') === 'success'
-            ]);
+
         } catch (Exception $e) {
             PaymentHoodHandler::safeLogModuleCall('callback_provider_store_error', [
                 'invoiceId' => $invoiceId,
@@ -236,13 +393,7 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
                 'notes' => $newNotes,
             ]);
 
-            PaymentHoodHandler::safeLogModuleCall('callback_invoice_notes_updated', [
-                'invoiceId' => $invoiceId,
-                'paymentState' => $paymentState,
-                'provider' => $providerName,
-            ], [
-                'success' => ($results['result'] ?? '') === 'success',
-            ]);
+
         }
     } catch (Exception $e) {
         PaymentHoodHandler::safeLogModuleCall('callback_invoice_notes_update_error', [
@@ -254,46 +405,37 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
 
     // decide for invoice based on payment provider state
     if ($paymentState === 'Captured') {
-        // Payment Success
-        PaymentHoodHandler::safeLogModuleCall('callback_captured_state_entered', [
-            'invoiceId' => $invoiceId,
-            'transactionId' => $transactionId,
-        ], [
-            'totalFee' => $totalFee,
-            'paymentAmount' => $data['amount'] ?? null,
-        ]);
+        // Clear the session redirect cache for this invoice so a future payment
+        // attempt (e.g. after expiry or on a new invoice) gets a fresh hosted-page.
+        unset($_SESSION['paymenthood_redirect_' . $invoiceId]);
 
+        // Payment Success
         try {
-            // check invoise status
             $invoiceData = localAPI('GetInvoice', ['invoiceid' => $invoiceId]);
-            
-            PaymentHoodHandler::safeLogModuleCall('callback_invoice_status_check', [
-                'invoiceId' => $invoiceId,
-            ], [
-                'invoiceStatus' => $invoiceData['status'] ?? 'unknown',
-                'invoiceTotal' => $invoiceData['total'] ?? null,
-            ]);
 
             if ($invoiceData['status'] === 'Paid') {
-                PaymentHoodHandler::safeLogModuleCall('callback_payment_already_recorded', [
-                    'invoiceId' => $invoiceId,
-                    'transactionId' => $transactionId
-                ], [
-                    'totalFee' => $totalFee,
-                    'feeWillNotBeAdded' => 'Invoice already paid',
-                ]);
+                // already recorded — nothing to do
             } else {
-                // Record payment with fee tracked in tblaccounts.fees
-                addInvoicePayment($invoiceId, $transactionId, $data['amount'], $totalFee, PAYMENTHOOD_GATEWAY);
+                // Record payment through WHMCS. addInvoicePayment() marks the invoice Paid,
+                // records the transaction, and triggers WHMCS's built-in email hooks
+                // (Invoice Payment Confirmation) — same as Stripe and all official gateways.
+                PaymentHoodHandler::recordInvoicePayment(
+                    (int) $invoiceId,
+                    $transactionId,
+                    $data['amount'],
+                    $totalFee,
+                    PAYMENTHOOD_GATEWAY
+                );
 
                 PaymentHoodHandler::safeLogModuleCall('callback_payment_recorded', [
-                    'invoiceId' => $invoiceId,
+                    'invoiceId'     => $invoiceId,
                     'transactionId' => $transactionId,
-                    'amount' => $data['amount'],
+                    'amount'        => $data['amount'],
+                    '_note'         => "Payment for invoice #$invoiceId has been captured by PaymentHood (state: Captured). Recording transaction #$transactionId in WHMCS and marking invoice as Paid.",
                 ], [
-                    'fee' => $totalFee,
-                    'gateway' => PAYMENTHOOD_GATEWAY,
-                    'feeRecordedInAccounts' => true,
+                    'fee'      => $totalFee,
+                    'gateway'  => PAYMENTHOOD_GATEWAY,
+                    '_result'  => 'Invoice marked as Paid. Transaction recorded in WHMCS accounts.',
                 ]);
             }
         } catch (Exception $e) {
@@ -306,13 +448,45 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
             ]);
         }
 
+        // Accept any pending order linked to this invoice so WHMCS sends
+        // Order Confirmation (customer) and New Order Notification (admin) emails.
+        try {
+            $orderId = Capsule::table('tblorders')
+                ->where('invoiceid', $invoiceId)
+                ->where('status', 'Pending')
+                ->value('id');
+
+            if ($orderId) {
+                $acceptResult = localAPI('AcceptOrder', [
+                    'orderid'   => $orderId,
+                    'sendemail' => false, // addInvoicePayment() already sent the payment confirmation
+                    'autosetup' => true,
+                ]);
+
+                $orderAccepted = ($acceptResult['result'] ?? '') === 'success';
+                PaymentHoodHandler::safeLogModuleCall('callback_order_accepted', [
+                    'invoiceId' => $invoiceId,
+                    'orderId'   => $orderId,
+                    '_note'     => "Payment confirmed for invoice #$invoiceId. Accepting pending order #$orderId to trigger service provisioning and send order confirmation emails.",
+                ], [
+                    'success'  => $orderAccepted ? 1 : 0,
+                    'error'    => $acceptResult['message'] ?? null,
+                    '_result'  => $orderAccepted
+                        ? "Order #$orderId accepted. Services are being provisioned and confirmation emails sent."
+                        : 'Order acceptance failed: ' . ($acceptResult['message'] ?? 'Unknown error'),
+                ]);
+            }
+        } catch (Exception $e) {
+            PaymentHoodHandler::safeLogModuleCall('callback_order_accept_error', [
+                'invoiceId' => $invoiceId,
+            ], [
+                'error' => $e->getMessage(),
+            ]);
+        }
+
         // it is for browser iteraction
         if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             $redirectUrl = PaymentHoodHandler::getSystemUrl() . "viewinvoice.php?id=$invoiceId&paymentsuccess=true";
-            PaymentHoodHandler::safeLogModuleCall('callback_redirect_success', [
-                'invoiceId' => $invoiceId,
-                'redirectUrl' => $redirectUrl
-            ], []);
 
             // Clear any WHMCS session data that might redirect to cart
             if (isset($_SESSION['cart'])) {
@@ -341,11 +515,7 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
             ];
             $results = localAPI($command, $postData);
 
-            PaymentHoodHandler::safeLogModuleCall('callback_invoice_refunded', [
-                'invoiceId' => $invoiceId
-            ], [
-                'success' => ($results['result'] ?? '') === 'success'
-            ]);
+
         } catch (Exception $e) {
             PaymentHoodHandler::safeLogModuleCall('callback_invoice_refund_error', [
                 'invoiceId' => $invoiceId
@@ -364,36 +534,125 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
         echo "OK";
         exit;
     } elseif ($paymentState === 'Failed') {
-        // Payment Failed - Use WHMCS API to update invoice
-        try {
-            $command = 'UpdateInvoice';
-            $postData = [
-                'invoiceid' => $invoiceId,
-                'status' => 'Cancelled',
-                'notes' => 'Payment failed via PaymentHood'
-            ];
-            $results = localAPI($command, $postData);
+        $isRecurringRenewalInvoice = paymenthood_isRecurringRenewalInvoice($invoiceId);
 
-            PaymentHoodHandler::safeLogModuleCall('callback_invoice_cancelled', [
-                'invoiceId' => $invoiceId
+        // Log the failed transaction.
+        logTransaction(PAYMENTHOOD_GATEWAY, $data, 'Failed');
+
+        // Clear session cache.
+        unset($_SESSION['paymenthood_redirect_' . $invoiceId]);
+
+        if ($isRecurringRenewalInvoice) {
+            // Renewal failures should remain payable, so send the retry-oriented email
+            // while the invoice is still Unpaid.
+            $emailStatus = paymenthood_sendRecurringFailureEmail($invoiceId);
+
+            PaymentHoodHandler::safeLogModuleCall('callback_payment_failed', [
+                'invoiceId'     => $invoiceId,
+                'transactionId' => $transactionId !== 'N/A' ? $transactionId : null,
+                'isRecurringRenewalInvoice' => 1,
+                '_note'         => "Recurring renewal payment failed for invoice #$invoiceId. A single retry-oriented email was attempted while the invoice remains Unpaid.",
             ], [
-                'success' => ($results['result'] ?? '') === 'success'
+                'emailSent'   => $emailStatus['sent'] ? 1 : 0,
+                'emailMethod' => $emailStatus['method'],
+                'emailError'  => $emailStatus['error'],
+                'emailDetails' => $emailStatus['details'],
+                '_result'     => $emailStatus['sent']
+                    ? 'Customer notified once. Renewal invoice remains Unpaid for retry; no order cancellation occurred.'
+                    : 'Recurring failure email not sent. Renewal invoice remains Unpaid for retry.',
+            ]);
+
+            PaymentHoodHandler::safeLogModuleCall('callback_recurring_payment_failed_open_invoice', [
+                'invoiceId' => $invoiceId,
+                '_note' => "Invoice #$invoiceId is a recurring renewal invoice. Leaving it Unpaid so the customer or future automation can retry payment. No order status change is applied.",
+            ], [
+                '_result' => 'Renewal invoice left Unpaid. Existing service/order state is unchanged.',
+            ]);
+
+            if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+                $redirectUrl = PaymentHoodHandler::getSystemUrl() . "viewinvoice.php?id=$invoiceId&paymentfailed=true";
+
+                if (isset($_SESSION['cart'])) {
+                    unset($_SESSION['cart']);
+                }
+                if (isset($_SESSION['orderdetails'])) {
+                    unset($_SESSION['orderdetails']);
+                }
+
+                header("Location: $redirectUrl");
+                exit;
+            }
+
+            http_response_code(200);
+            echo "OK";
+            exit;
+        }
+
+        // One-time checkout failures are final in this workflow: cancel invoice and
+        // pending order first, then send a single cancelled/final-state email.
+
+        // Cancel the invoice.
+        try {
+            localAPI('UpdateInvoice', [
+                'invoiceid' => $invoiceId,
+                'status'    => 'Cancelled',
+                'notes'     => 'Payment failed via PaymentHood',
             ]);
         } catch (Exception $e) {
             PaymentHoodHandler::safeLogModuleCall('callback_invoice_cancel_error', [
-                'invoiceId' => $invoiceId
+                'invoiceId' => $invoiceId,
             ], [
-                'error' => $e->getMessage()
+                'error' => $e->getMessage(),
             ]);
         }
+
+        // Cancel the linked pending order.
+        try {
+            $failedOrderId = Capsule::table('tblorders')
+                ->where('invoiceid', $invoiceId)
+                ->where('status', 'Pending')
+                ->value('id');
+
+            if ($failedOrderId) {
+                $cancelResult = localAPI('CancelOrder', ['orderid' => $failedOrderId]);
+
+                PaymentHoodHandler::safeLogModuleCall('callback_order_cancelled_on_failure', [
+                    'invoiceId' => $invoiceId,
+                    'orderId'   => $failedOrderId,
+                    '_note'     => "Payment failed — cancelling pending order #$failedOrderId linked to invoice #$invoiceId.",
+                ], [
+                    'success' => ($cancelResult['result'] ?? '') === 'success',
+                    'error'   => $cancelResult['message'] ?? null,
+                ]);
+            }
+        } catch (Exception $e) {
+            PaymentHoodHandler::safeLogModuleCall('callback_order_cancel_error', [
+                'invoiceId' => $invoiceId,
+            ], [
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        $emailStatus = paymenthood_sendCancelledFailureEmail($invoiceId);
+
+        PaymentHoodHandler::safeLogModuleCall('callback_payment_failed', [
+            'invoiceId'     => $invoiceId,
+            'transactionId' => $transactionId !== 'N/A' ? $transactionId : null,
+            'isRecurringRenewalInvoice' => 0,
+            '_note'         => "Initial checkout payment failed for invoice #$invoiceId. Invoice and pending order were cancelled first, then a single final-state email was attempted.",
+        ], [
+            'emailSent'   => $emailStatus['sent'] ? 1 : 0,
+            'emailMethod' => $emailStatus['method'],
+            'emailError'  => $emailStatus['error'],
+            'emailDetails' => $emailStatus['details'],
+            '_result'     => $emailStatus['sent']
+                ? 'Customer notified once with cancelled/final-state messaging.'
+                : 'Final-state cancellation email not sent. See emailError/emailDetails for the exact WHMCS response.',
+        ]);
 
         // it is for browser iteraction
         if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             $redirectUrl = PaymentHoodHandler::getSystemUrl() . "viewinvoice.php?id=$invoiceId&paymentfailed=true";
-            PaymentHoodHandler::safeLogModuleCall('callback_redirect_failed', [
-                'invoiceId' => $invoiceId,
-                'redirectUrl' => $redirectUrl
-            ], []);
 
             // Clear any WHMCS session data that might redirect to cart
             if (isset($_SESSION['cart'])) {
@@ -415,11 +674,6 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
         // it is for browser iteraction
         if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             $redirectUrl = PaymentHoodHandler::getSystemUrl() . "viewinvoice.php?id=$invoiceId&paymentpending=true";
-            PaymentHoodHandler::safeLogModuleCall('callback_redirect_pending', [
-                'invoiceId' => $invoiceId,
-                'paymentState' => $paymentState,
-                'redirectUrl' => $redirectUrl
-            ], []);
 
             // Clear any WHMCS session data that might redirect to cart
             if (isset($_SESSION['cart'])) {

@@ -154,14 +154,6 @@ function paymenthood_getActivationLink($activated)
         . '&licenseId=' . urlencode($licenseId)
         . '&grantAuthorization=' . urlencode('true');
 
-    PaymentHoodHandler::safeLogModuleCall('gateway_activation_link_generated', [
-        'licenseId' => $licenseId,
-        'returnUrl' => $currentUrl,
-        'activated' => $activated
-    ], [
-        'url' => $paymenthoodUrl
-    ]);
-
     if ($activated == '1') {
         return '<span style="color:#28a745;font-weight:bold;">✓ Account is activated</span>';
     }
@@ -486,9 +478,16 @@ function paymenthood_createCustomFields()
 function paymenthood_link($params)
 {
     try {
-        PaymentHoodHandler::safeLogModuleCall('gateway_link_invoked', [
-            'invoiceId' => $params['invoiceid'] ?? null
-        ], []);
+        if (defined('WHMCS_MAIL') && WHMCS_MAIL) {
+            $systemUrl = rtrim((string) ($params['systemurl'] ?? PaymentHoodHandler::getSystemUrl()), '/');
+            $invoiceId = (int) ($params['invoiceid'] ?? 0);
+            $invoiceUrl = $invoiceId > 0
+                ? $systemUrl . '/viewinvoice.php?id=' . $invoiceId
+                : $systemUrl . '/clientarea.php?action=invoices';
+
+            return '<a href="' . htmlspecialchars($invoiceUrl, ENT_QUOTES, 'UTF-8') . '">Pay with PaymentHood</a>';
+        }
+
         return paymenthoodHandler::handleInvoice($params);
     } catch (\Throwable $ex) {
         PaymentHoodHandler::safeLogModuleCall('gateway_link_error', [
