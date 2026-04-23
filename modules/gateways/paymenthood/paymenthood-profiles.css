@@ -107,3 +107,13 @@
     from { opacity: 0; }
     to { opacity: 1; }
 }
+
+/* For lagom-futuristic theme */
+.lagom-futuristic #paymenthood-section{
+    padding: 20px;
+    background: var(--ui-block-bg-form);
+    margin-bottom: var(--ui-block-spacing-lg);
+    border: var(--panel-border);
+    border-radius: var(--panel-border-radius);
+    box-shadow: var(--panel-box-shadow);
+}
