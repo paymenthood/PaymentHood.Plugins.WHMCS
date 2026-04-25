@@ -729,3 +729,286 @@
         boot();
     }
 })();
+
+// ── Block Apply Credit when a PaymentHood payment is in-flight ──────────────
+// Activated only when the PHP hook sets blockCreditApplication: true in
+// window.PAYMENTHOOD_CONFIG (invoice page, invoice is Unpaid, payment exists).
+(function () {
+    if (!(window.PAYMENTHOOD_CONFIG && window.PAYMENTHOOD_CONFIG.blockCreditApplication)) {
+        return;
+    }
+
+    var msg = window.PAYMENTHOOD_CONFIG.blockCreditMessage ||
+        'A PaymentHood payment is in progress for this invoice. Please wait for it to complete or expire before applying credit.';
+
+    var SELECTORS = [
+        'form[action*="applycredit"]',
+        'form[action*="addcredit"]',
+        '[data-action="applycredit"]',
+        '[data-action="addcredit"]',
+        'a[href*="applycredit"]',
+        'a[href*="addcredit"]',
+        'button[name="applycredit"]',
+        'input[name="applycredit"]',
+        'button[value="applycredit"]',
+        'input[value="applycredit"]',
+        'button[name="addcredit"]',
+        'input[name="addcredit"]'
+    ];
+
+    function hideCreditControl(el) {
+        el.classList.add('paymenthood-credit-blocked');
+        var parent = el.closest(
+            '.apply-credit, .creditbox, .invoice-apply-credit, .balance-credit, .panel, .well, form, .btn, .button'
+        );
+        if (parent) {
+            parent.classList.add('paymenthood-credit-blocked');
+        }
+    }
+
+    function block() {
+        // Hide via CSS class
+        SELECTORS.forEach(function (sel) {
+            document.querySelectorAll(sel).forEach(function (el) {
+                hideCreditControl(el);
+            });
+        });
+
+        // Also intercept forms that contain credit application controls/fields.
+        document.querySelectorAll('form').forEach(function (form) {
+            var hidden = form.querySelector('input[name="action"][value="applycredit"], input[name="action"][value="addcredit"]');
+            var button = form.querySelector('button[name="applycredit"], input[name="applycredit"], button[name="addcredit"], input[name="addcredit"]');
+            var creditField = form.querySelector('input[name="credit"], input[name="creditamount"], input[name="applyCredit"], input[name="addcredit"]');
+
+            if (hidden || button || creditField) {
+                hideCreditControl(form);
+                if (!form._phCreditBlocked) {
+                    form._phCreditBlocked = true;
+                    form.addEventListener('submit', function (e) {
+                        e.preventDefault();
+                        e.stopImmediatePropagation();
+                        alert(msg);
+                    }, true);
+                }
+            }
+        });
+    }
+
+    // Run immediately, on DOMContentLoaded, and on any DOM mutation
+    block();
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', block);
+    }
+    var observer = new MutationObserver(block);
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+})();
+
+// ── Block payment method switching when PaymentHood payment is in-flight ─────
+// Activated only when the PHP hook sets blockPaymentMethodSwitch: true.
+(function () {
+    if (!(window.PAYMENTHOOD_CONFIG && window.PAYMENTHOOD_CONFIG.blockPaymentMethodSwitch)) {
+        return;
+    }
+
+    var msg = window.PAYMENTHOOD_CONFIG.blockPaymentMethodMsg ||
+        'A PaymentHood payment is already in progress. You cannot switch payment methods until it completes or expires.';
+
+    function isPaymentHoodValue(value) {
+        return String(value || '').toLowerCase().indexOf('paymenthood') !== -1;
+    }
+
+    function lockElement(el) {
+        if (!el) {
+            return;
+        }
+        el.classList.add('paymenthood-method-locked');
+        if ('disabled' in el) {
+            el.disabled = true;
+        }
+    }
+
+    function intercept(el) {
+        if (!el || el._phMethodLocked) {
+            return;
+        }
+
+        el._phMethodLocked = true;
+        el.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            alert(msg);
+        }, true);
+        el.addEventListener('change', function (e) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            alert(msg);
+        }, true);
+    }
+
+    function findPaymentHoodOption(selectEl) {
+        return Array.prototype.find.call(selectEl.options || [], function (option) {
+            return isPaymentHoodValue(option.value);
+        }) || null;
+    }
+
+    function forceHide(el) {
+        if (!el) {
+            return;
+        }
+        el.style.setProperty('display', 'none', 'important');
+    }
+
+    function hidePaymentMethodControl(el) {
+        if (!el) {
+            return;
+        }
+
+        forceHide(el);
+
+        // Walk up the DOM aggressively to hide the entire containing row/section.
+        // WHMCS templates wrap the gateway <select> in various container elements;
+        // we climb until we find a recognisable wrapper or hit 5 levels up.
+        var node = el.parentElement;
+        var levels = 0;
+        while (node && levels < 5) {
+            // If we hit <form>, <body>, or main content area, stop — don't hide
+            // the entire page.
+            if (node.tagName === 'FORM' || node.tagName === 'BODY') {
+                break;
+            }
+
+            var cls = (node.className || '').toLowerCase();
+            var isRow = cls.indexOf('row') !== -1
+                || cls.indexOf('form-group') !== -1
+                || cls.indexOf('col-') !== -1
+                || cls.indexOf('payment-method') !== -1
+                || cls.indexOf('gateway') !== -1
+                || node.tagName === 'TR'
+                || node.tagName === 'LI';
+
+            if (isRow) {
+                forceHide(node);
+                break;
+            }
+
+            // Also hide if this node is a small wrapper (div/span/td) that only
+            // wraps the gateway control itself.
+            var children = node.children || [];
+            if (children.length <= 2) {
+                forceHide(node);
+            }
+
+            node = node.parentElement;
+            levels++;
+        }
+    }
+
+    function selectPaymentHoodRadio() {
+        var paymentHoodRadio = document.querySelector(
+            'input[type="radio"][name="paymentmethod"][value="paymenthood"], '
+            + 'input[type="radio"][name="gateway"][value="paymenthood"]'
+        );
+
+        if (paymentHoodRadio) {
+            paymentHoodRadio.checked = true;
+        }
+    }
+
+    function lockMethods() {
+        // Hide the entire payment method selection area — no notice banner needed
+        // because the customer should only see the PaymentHood continue-to-payment form.
+
+        // Hide all payment method controls (selects, radios, buttons, data-attrs).
+        document.querySelectorAll(
+            'input[type="radio"][name="paymentmethod"], '
+            + 'input[type="radio"][name="gateway"], '
+            + 'select[name="paymentmethod"], '
+            + 'select[name="gateway"], '
+            + 'button[name="paymentmethod"], '
+            + 'input[name="paymentmethod"], '
+            + '[data-gateway], [data-paymentmethod]'
+        ).forEach(function (el) {
+            var val = el.value || el.getAttribute('data-gateway') || el.getAttribute('data-paymentmethod') || '';
+            if (el.tagName === 'SELECT') {
+                // Remove all non-PaymentHood options from the dropdown
+                Array.prototype.slice.call(el.options || []).forEach(function (option) {
+                    if (!isPaymentHoodValue(option.value)) {
+                        option.remove();
+                    }
+                });
+
+                var paymentHoodOption = findPaymentHoodOption(el);
+                if (paymentHoodOption) {
+                    el.value = paymentHoodOption.value;
+                }
+
+                // Hide the entire gateway selector area — the customer should
+                // not see a payment method choice at all.
+                hidePaymentMethodControl(el);
+
+                // Also hide any associated <label> for this select
+                if (el.id) {
+                    var label = document.querySelector('label[for="' + el.id + '"]');
+                    forceHide(label);
+                }
+                var parentLabel = el.closest('label');
+                forceHide(parentLabel);
+
+                intercept(el);
+                return;
+            }
+
+            if (!isPaymentHoodValue(val)) {
+                if ((el.type === 'radio' || el.type === 'checkbox') && el.checked) {
+                    el.checked = false;
+                    selectPaymentHoodRadio();
+                }
+
+                // Completely hide non-PaymentHood options
+                forceHide(el);
+
+                // Also hide the parent label/container.
+                var parent = el.closest('label, .gateway-option, .payment-method-option, li, .form-group, .panel, .well');
+                if (parent) {
+                    forceHide(parent);
+                }
+            }
+        });
+
+        // Hide links/buttons that would switch away.
+        document.querySelectorAll(
+            '[data-gateway], [data-paymentmethod], a[href*="paymentmethod="], a[href*="gateway="], button[data-gateway], button[data-paymentmethod]'
+        ).forEach(function (el) {
+            var val = el.getAttribute('data-gateway') || el.getAttribute('data-paymentmethod') || el.href || '';
+            if (!isPaymentHoodValue(val)) {
+                forceHide(el);
+            }
+        });
+
+        document.querySelectorAll('form').forEach(function (form) {
+            var paymentMethodField = form.querySelector('select[name="paymentmethod"], select[name="gateway"], input[name="paymentmethod"], input[name="gateway"]');
+            if (!paymentMethodField) {
+                return;
+            }
+
+            var value = paymentMethodField.value || paymentMethodField.getAttribute('value') || '';
+            if (!isPaymentHoodValue(value)) {
+                if (paymentMethodField.tagName === 'SELECT') {
+                    var paymentHoodOption = findPaymentHoodOption(paymentMethodField);
+                    if (paymentHoodOption) {
+                        paymentMethodField.value = paymentHoodOption.value;
+                    }
+                }
+
+                intercept(form);
+            }
+        });
+    }
+
+    lockMethods();
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', lockMethods);
+    }
+    var observer = new MutationObserver(lockMethods);
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+})();

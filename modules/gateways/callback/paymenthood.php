@@ -205,6 +205,10 @@ function paymenthood_isRecurringRenewalInvoice(int $invoiceId): bool
             ->where('ii.type', 'Hosting')
             ->whereNotIn('h.billingcycle', ['One Time', 'Free', ''])
             ->whereColumn('i.duedate', '=', 'h.nextduedate')
+            // A new subscription has a Pending hosting record; a renewal has an Active/Suspended one.
+            // Excluding Pending ensures new subscription failures are treated as final (cancel invoice),
+            // not as retryable renewal failures.
+            ->whereNotIn('h.domainstatus', ['Pending', ''])
             ->exists();
     } catch (\Throwable $e) {
         return false;
@@ -414,11 +418,28 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
             $invoiceData = localAPI('GetInvoice', ['invoiceid' => $invoiceId]);
 
             if ($invoiceData['status'] === 'Paid') {
-                // already recorded — nothing to do
+                // Invoice was already paid (e.g. by credit) before this webhook arrived.
+                // This should not happen because the client-area hook blocks Apply Credit
+                // when a PaymentHood payment exists for an Unpaid invoice. If it does
+                // happen anyway, log a prominent warning for manual admin action.
+                PaymentHoodHandler::safeLogModuleCall('callback_captured_invoice_already_paid', [
+                    'invoiceId'     => $invoiceId,
+                    'transactionId' => $transactionId !== 'N/A' ? $transactionId : null,
+                    'source'        => $callbackSource,
+                    '_note'         => "ATTENTION: Invoice #$invoiceId was already Paid when PaymentHood reported Captured. The customer may have been double-charged. Manual review and refund required via PaymentHood console.",
+                ], [
+                    'amount'  => $data['amount'] ?? null,
+                    '_result' => 'No automated action taken. Admin must review and issue refund manually if needed.',
+                ]);
             } else {
                 // Record payment through WHMCS. addInvoicePayment() marks the invoice Paid,
                 // records the transaction, and triggers WHMCS's built-in email hooks
                 // (Invoice Payment Confirmation) — same as Stripe and all official gateways.
+                // Only log to Gateway Log once — via the authoritative webhook (POST).
+                // The browser return (GET) for the same payment must not create a duplicate entry.
+                if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+                    logTransaction(PAYMENTHOOD_GATEWAY, $data, 'Successful');
+                }
                 PaymentHoodHandler::recordInvoicePayment(
                     (int) $invoiceId,
                     $transactionId,
@@ -505,6 +526,9 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
 
         exit;
     } elseif ($paymentState === 'Refunded') {
+        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+            logTransaction(PAYMENTHOOD_GATEWAY, $data, 'Refunded');
+        }
         // Payment Refunded - Use WHMCS API to update invoice
         try {
             $command = 'UpdateInvoice';
@@ -536,8 +560,36 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
     } elseif ($paymentState === 'Failed') {
         $isRecurringRenewalInvoice = paymenthood_isRecurringRenewalInvoice($invoiceId);
 
-        // Log the failed transaction.
-        logTransaction(PAYMENTHOOD_GATEWAY, $data, 'Failed');
+        // Guard against duplicate webhook processing — if the invoice is already in a
+        // terminal state from a prior callback, skip all processing including the log.
+        try {
+            $currentInvoiceData = localAPI('GetInvoice', ['invoiceid' => $invoiceId]);
+            $currentStatus = $currentInvoiceData['status'] ?? '';
+            if (in_array($currentStatus, ['Cancelled', 'Paid', 'Refunded'], true)) {
+                PaymentHoodHandler::safeLogModuleCall('callback_failed_duplicate_skipped', [
+                    'invoiceId' => $invoiceId,
+                    'source'    => $callbackSource,
+                ], [
+                    'currentStatus' => $currentStatus,
+                    '_result'       => "Invoice #$invoiceId is already in '$currentStatus' state. Duplicate Failed webhook ignored.",
+                ]);
+
+                if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+                    header("Location: " . PaymentHoodHandler::getSystemUrl() . "viewinvoice.php?id=$invoiceId&paymentfailed=true");
+                    exit;
+                }
+                http_response_code(200);
+                echo "OK";
+                exit;
+            }
+        } catch (Exception $e) {
+            // If we can't check, proceed normally
+        }
+
+        // Log the failed transaction once — via the authoritative webhook (POST) only.
+        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+            logTransaction(PAYMENTHOOD_GATEWAY, $data, 'Failed');
+        }
 
         // Clear session cache.
         unset($_SESSION['paymenthood_redirect_' . $invoiceId]);
@@ -671,6 +723,9 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
         exit;
     } else {
         // Still processing
+        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+            logTransaction(PAYMENTHOOD_GATEWAY, $data, 'Pending');
+        }
         // it is for browser iteraction
         if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             $redirectUrl = PaymentHoodHandler::getSystemUrl() . "viewinvoice.php?id=$invoiceId&paymentpending=true";

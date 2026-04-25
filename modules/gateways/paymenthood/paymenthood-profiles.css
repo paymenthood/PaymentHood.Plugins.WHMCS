@@ -2,6 +2,28 @@
     margin-top: 0;
 }
 
+/* Applied when a PaymentHood payment is in-flight for this invoice */
+.paymenthood-credit-blocked {
+    display: none !important;
+}
+
+/* Applied to payment method options when switching is locked */
+.paymenthood-method-locked {
+    pointer-events: none !important;
+    opacity: 0.4 !important;
+    cursor: not-allowed !important;
+}
+
+.paymenthood-method-locked-notice {
+    padding: 8px 12px;
+    margin-bottom: 10px;
+    background: #fff3cd;
+    border: 1px solid #ffc107;
+    border-radius: 4px;
+    font-size: 0.9em;
+    color: #856404;
+}
+
 .paymenthood-profiles-title {
     /* Styles handled by alert alert-info classes from theme */
     margin-bottom: 12px;
