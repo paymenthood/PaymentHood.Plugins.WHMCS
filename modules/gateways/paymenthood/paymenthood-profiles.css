@@ -1,5 +1,5 @@
 .paymenthood-profiles-container {
-    margin-top: 0;
+    margin-bottom: 40px;
 }
 
 /* Applied when a PaymentHood payment is in-flight for this invoice */
@@ -38,6 +38,7 @@
 
 .paymenthood-profile-item {
     background: white;
+    border: 1px #ccc solid;
     border-radius: 20px;
     cursor: default;
     text-align: center;
@@ -124,6 +125,10 @@
     to { opacity: 1; }
 }
 
+.lagom-futuristic .paymenthood-profiles-container {
+    margin-bottom: 0;
+}
+
 /* For lagom-futuristic theme */
 .lagom-futuristic #paymenthood-section{
     padding: 20px;
@@ -132,4 +137,8 @@
     border: var(--panel-border);
     border-radius: var(--panel-border-radius);
     box-shadow: var(--panel-box-shadow);
+}
+
+.lagom-futuristic .paymenthood-profile-item{
+    border: none;
 }
