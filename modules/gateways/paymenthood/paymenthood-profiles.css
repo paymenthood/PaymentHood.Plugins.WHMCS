@@ -125,11 +125,10 @@
     to { opacity: 1; }
 }
 
+/******* For lagom-futuristic theme *******/
 .lagom-futuristic .paymenthood-profiles-container {
     margin-bottom: 0;
 }
-
-/* For lagom-futuristic theme */
 .lagom-futuristic #paymenthood-section{
     padding: 20px;
     background: var(--ui-block-bg-form);
@@ -138,7 +137,9 @@
     border-radius: var(--panel-border-radius);
     box-shadow: var(--panel-box-shadow);
 }
-
 .lagom-futuristic .paymenthood-profile-item{
     border: none;
+}
+.lagom-futuristic .paymenthood-profiles-loading{
+    color: white !important;
 }
