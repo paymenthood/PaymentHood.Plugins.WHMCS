@@ -1,0 +1,24 @@
+{
+  "name": "paymenthood-whmcs-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "End-to-end tests for the PaymentHood WHMCS payment gateway plugin",
+  "type": "module",
+  "scripts": {
+    "deploy": "node scripts/deploy-plugin.mjs",
+    "test": "playwright test",
+    "test:setup": "playwright test tests/01-setup.spec.ts",
+    "test:purchase": "playwright test tests/02-purchase.spec.ts",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "report": "playwright show-report",
+    "codegen": "playwright codegen"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "@types/node": "^22.7.0",
+    "dotenv": "^16.4.5",
+    "mysql2": "^3.11.0",
+    "typescript": "^5.6.0"
+  }
+}

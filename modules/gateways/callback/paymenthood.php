@@ -280,6 +280,53 @@ function processPaymenthoodCallback(string $referenceId, bool $validateAuthoriza
     }
 
     if ($validateAuthorization && !validatePaymenthoodWebhookToken($webhookToken)) {
+        $authHeader = $_SERVER['HTTP_AUTHORIZATION']
+            ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION']
+            ?? '';
+        $authHeaderSource = isset($_SERVER['HTTP_AUTHORIZATION']) ? 'HTTP_AUTHORIZATION'
+            : (isset($_SERVER['REDIRECT_HTTP_AUTHORIZATION']) ? 'REDIRECT_HTTP_AUTHORIZATION' : 'none');
+
+        if ($authHeader === '' && function_exists('apache_request_headers')) {
+            foreach (apache_request_headers() as $name => $value) {
+                if (strtolower($name) === 'authorization') {
+                    $authHeader = $value;
+                    $authHeaderSource = 'apache_request_headers';
+                    break;
+                }
+            }
+        }
+
+        $hasBearer     = strpos($authHeader, 'Bearer ') === 0;
+        $incomingToken = $hasBearer ? substr($authHeader, 7) : '';
+
+        // Determine the exact failure reason without exposing actual token values.
+        if (!$hasBearer) {
+            $failReason = $authHeader === ''
+                ? 'Authorization header is missing entirely (checked HTTP_AUTHORIZATION, REDIRECT_HTTP_AUTHORIZATION, apache_request_headers)'
+                : 'Authorization header present but does not start with "Bearer " (scheme: ' . substr($authHeader, 0, min(20, strlen($authHeader))) . '...)';
+        } elseif (strlen($incomingToken) !== strlen($webhookToken)) {
+            $failReason = 'Token length mismatch — incoming ' . strlen($incomingToken) . ' chars vs configured ' . strlen($webhookToken) . ' chars';
+        } else {
+            $failReason = 'Token content mismatch — lengths match (' . strlen($webhookToken) . ' chars) but values differ';
+        }
+
+        PaymentHoodHandler::safeLogModuleCall('callback_webhook_401_unauthorized', [
+            'referenceId'            => $referenceId,
+            'source'                 => 'webhook (POST)',
+            '_note'                  => 'Webhook authorization failed. Verify the Webhook Token in WHMCS gateway settings matches the secret configured in your PaymentHood app.',
+        ], [
+            'failReason'             => $failReason,
+            'webhookTokenConfigured' => true, // always true here; empty token is caught earlier
+            'webhookTokenLength'     => strlen($webhookToken),
+            'authHeaderSource'       => $authHeaderSource,
+            'authHeaderPresent'      => $authHeader !== '',
+            'authHeaderScheme'       => $hasBearer ? 'Bearer' : ($authHeader !== '' ? 'other' : 'none'),
+            'incomingTokenLength'    => strlen($incomingToken),
+            'tokenLengthMatch'       => strlen($webhookToken) === strlen($incomingToken),
+            'remoteAddr'             => $_SERVER['REMOTE_ADDR'] ?? 'unknown',
+            '_result'                => 'HTTP 401 Unauthorized returned.',
+        ]);
+
         http_response_code(401);
         die('Unauthorized');
     }
@@ -754,7 +801,21 @@ function validatePaymenthoodWebhookToken(string $webhookToken): bool
         return false; // Token not configured
     }
 
-    $authHeader = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+    // $_SERVER['HTTP_AUTHORIZATION'] is not populated on many Apache setups unless
+    // "CGIPassAuth On" or "RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]"
+    // is set. Try all known fallback sources before giving up.
+    $authHeader = $_SERVER['HTTP_AUTHORIZATION']
+        ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION']  // set by some Apache rewrite rules
+        ?? '';
+
+    if ($authHeader === '' && function_exists('apache_request_headers')) {
+        foreach (apache_request_headers() as $name => $value) {
+            if (strtolower($name) === 'authorization') {
+                $authHeader = $value;
+                break;
+            }
+        }
+    }
 
     if (strpos($authHeader, 'Bearer ') !== 0) {
         return false; // Missing Bearer token
