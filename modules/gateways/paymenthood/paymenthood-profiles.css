@@ -1,5 +1,5 @@
 .paymenthood-profiles-container {
-    margin-top: 0;
+    margin-bottom: 40px;
 }
 
 /* Applied when a PaymentHood payment is in-flight for this invoice */
@@ -32,15 +32,16 @@
 
 .paymenthood-profiles-list {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(90px, max-content));
+    justify-content: center;
     gap: 10px;
 }
 
 .paymenthood-profile-item {
-    padding: 8px;
     background: white;
-    border: 2px solid #e0e0e0;
-    border-radius: 4px;
+    border: 1px #ccc solid;
+    border-radius: 20px;
+    padding: 0 10px;
     cursor: default;
     text-align: center;
     user-select: none;
@@ -51,13 +52,11 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 8px;
+    gap: 2px;
 }
 
 .paymenthood-profile-icon {
-    width: 60px;
-    height: 40px;
-    margin: 0;
+    height: 27px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -65,12 +64,7 @@
 }
 
 .paymenthood-profile-icon img {
-    max-width: 100%;
-    max-height: 100%;
-    width: auto;
-    height: auto;
-    object-fit: contain;
-    display: block;
+    height: 19px;
 }
 
 /* Built-in card icon, shown when no artwork comes back from the API. */
@@ -137,7 +131,10 @@
     to { opacity: 1; }
 }
 
-/* For lagom-futuristic theme */
+/******* For lagom-futuristic theme *******/
+.lagom-futuristic .paymenthood-profiles-container {
+    margin-bottom: 0;
+}
 .lagom-futuristic #paymenthood-section{
     padding: 20px;
     background: var(--ui-block-bg-form);
@@ -145,4 +142,13 @@
     border: var(--panel-border);
     border-radius: var(--panel-border-radius);
     box-shadow: var(--panel-box-shadow);
+}
+.lagom-futuristic .paymenthood-profile-item{
+    border: none;
+}
+.lagom-futuristic .paymenthood-profiles-loading{
+    color: white !important;
+}
+.lagom-futuristic .paymenthood-profiles-list {
+    justify-content: start;
 }
