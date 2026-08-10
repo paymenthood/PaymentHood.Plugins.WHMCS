@@ -1714,6 +1714,124 @@ class PaymentHoodHandler
         return rtrim('https://console.paymenthood.com/', '/');
     }
 
+    // ── Refund two-factor authentication ────────────────────────────────
+    //
+    // The refund and mark-as-refund endpoints are 2FA-protected. They answer
+    // with a typed exception envelope rather than a plain HTTP status:
+    //
+    //   {"TypeName":"NeedToActive2FaException", "TypeFullName":"...", ...}
+    //   {"TypeName":"Invalid2FaException",      "TypeFullName":"...", ...}
+    //
+    // NeedToActive2Fa  -> the operator has no authenticator enrolled at all.
+    //                     Nothing the module can do; they must enrol first.
+    // Invalid2Fa       -> enrolled, but no/incorrect otpCode was sent.
+    //                     Recoverable: prompt for a code and retry.
+
+    const REFUND_2FA_NEEDS_ACTIVATION = 'needs_activation';
+    const REFUND_2FA_INVALID_CODE     = 'invalid_code';
+
+    /** Session key holding a one-shot prompt flag for the admin UI. */
+    const REFUND_2FA_SESSION_KEY = 'paymenthood_refund_2fa';
+
+    /**
+     * Classify a PaymentHood API response as a 2FA failure.
+     *
+     * @param  mixed $response Decoded array or raw response body.
+     * @return string|null One of the REFUND_2FA_* constants, or null.
+     */
+    public static function detectTwoFactorError($response)
+    {
+        $typeNames = [];
+        $raw = '';
+
+        if (is_string($response)) {
+            $raw = $response;
+            $decoded = json_decode($response, true);
+            if (is_array($decoded)) {
+                $response = $decoded;
+            }
+        }
+
+        if (is_array($response)) {
+            foreach (['TypeName', 'TypeFullName', 'typeName', 'typeFullName'] as $key) {
+                if (isset($response[$key]) && is_string($response[$key])) {
+                    $typeNames[] = $response[$key];
+                }
+            }
+            if ($raw === '') {
+                $raw = (string) json_encode($response);
+            }
+        }
+
+        // Prefer the typed field; fall back to the raw body so a wrapped or
+        // re-serialised envelope is still recognised.
+        $haystacks = $typeNames !== [] ? $typeNames : [$raw];
+
+        foreach ($haystacks as $haystack) {
+            if (stripos($haystack, 'NeedToActive2FaException') !== false) {
+                return self::REFUND_2FA_NEEDS_ACTIVATION;
+            }
+        }
+
+        foreach ($haystacks as $haystack) {
+            if (stripos($haystack, 'Invalid2FaException') !== false) {
+                return self::REFUND_2FA_INVALID_CODE;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Read the authenticator code the operator supplied on the refund form.
+     *
+     * The field is injected into WHMCS's own refund form by the admin hook, so
+     * it arrives in the same POST that triggers paymenthood_refund().
+     */
+    public static function readRefundOtpCode(): string
+    {
+        $code = isset($_REQUEST['paymenthood_otpcode']) ? (string) $_REQUEST['paymenthood_otpcode'] : '';
+        $code = preg_replace('/\D/', '', $code);
+
+        // Authenticator codes are 6 digits; 8 covers backup/recovery formats.
+        if ($code === '' || strlen($code) < 6 || strlen($code) > 8) {
+            return '';
+        }
+
+        return $code;
+    }
+
+    /**
+     * Record that the admin UI should prompt for a code on this page render.
+     */
+    public static function flagRefund2fa(string $reason, int $invoiceId, string $message = ''): void
+    {
+        if (session_status() !== PHP_SESSION_ACTIVE) {
+            return;
+        }
+
+        $_SESSION[self::REFUND_2FA_SESSION_KEY] = [
+            'reason'    => $reason,
+            'invoiceId' => $invoiceId,
+            'message'   => $message,
+        ];
+    }
+
+    /**
+     * Read and clear the prompt flag. One-shot: a reload must not re-prompt.
+     */
+    public static function consumeRefund2faFlag()
+    {
+        if (session_status() !== PHP_SESSION_ACTIVE || empty($_SESSION[self::REFUND_2FA_SESSION_KEY])) {
+            return null;
+        }
+
+        $flag = $_SESSION[self::REFUND_2FA_SESSION_KEY];
+        unset($_SESSION[self::REFUND_2FA_SESSION_KEY]);
+
+        return is_array($flag) ? $flag : null;
+    }
+
     public static function paymenthood_getPaymentAppBaseUrl(): string
     {
         return rtrim('https://appapi.paymenthood.com/api/', '/');

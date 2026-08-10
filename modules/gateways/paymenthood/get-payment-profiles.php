@@ -19,150 +19,79 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && !empty($_GET['proxy'])) {
     while (ob_get_level() > 0) {
         ob_end_clean();
     }
-    
-    $url = isset($_GET['u']) ? (string) $_GET['u'] : '';
-    $url = trim($url);
-    
-    if (strpos($url, '//') === 0) {
-        $url = 'https:' . $url;
-    }
-    
-    if (strlen($url) > 2048 || $url === '') {
-        http_response_code(400);
+
+    // icon-proxy-guard.php ships in this same directory and both proxy entry
+    // points require it. A missing file here is almost always a partial upload,
+    // and without this check it surfaces as a bare fatal with no explanation.
+    $guardPath = __DIR__ . '/icon-proxy-guard.php';
+    if (!is_file($guardPath)) {
+        error_log('PaymentHood icon proxy: missing ' . $guardPath
+            . ' - re-upload modules/gateways/paymenthood/ in full.');
+        http_response_code(500);
         header('Content-Type: text/plain');
-        echo 'Invalid url';
+        echo 'Icon proxy misconfigured';
         exit;
     }
-    
-    $parts = @parse_url($url);
-    if (!is_array($parts) || empty($parts['scheme']) || empty($parts['host'])) {
-        http_response_code(400);
-        header('Content-Type: text/plain');
-        echo 'Invalid url';
-        exit;
-    }
-    
-    $scheme = strtolower((string) $parts['scheme']);
-    $host = strtolower((string) $parts['host']);
-    
-    if ($scheme !== 'https') {
-        http_response_code(400);
-        header('Content-Type: text/plain');
-        echo 'Only https allowed';
-        exit;
-    }
-    
-    // Allowlist blob storage hosts
-    $allowed = (
-        $host === 'phpaymentstorageaccount.blob.core.windows.net'
-        || substr($host, -22) === '.blob.core.windows.net'
-        || $host === 'paymenthood.com'
-        || substr($host, -15) === '.paymenthood.com'
-        || substr($host, -13) === '.azureedge.net'
-    );
-    
-    if (!$allowed) {
-        $hostSuffix = substr($host, -24);
-        error_log(sprintf(
-            'PaymentHood icon proxy blocked: host=%s, suffix=%s, match=%s',
-            $host,
-            $hostSuffix,
-            $hostSuffix === '.blob.core.windows.net' ? 'yes' : 'no'
-        ));
+    require_once $guardPath;
+
+    // Validates scheme/host/port/credentials and rebuilds the URL from the
+    // parts that were actually checked. See icon-proxy-guard.php.
+    $requestedUrl = isset($_GET['u']) ? (string) $_GET['u'] : '';
+    $target = paymenthood_iconProxyValidateUrl($requestedUrl);
+    if ($target === false) {
+        // Logged server-side only. Echoing the rejected host back to the caller
+        // would leak it, but with no record at all a blocked icon is impossible
+        // to diagnose.
+        error_log('PaymentHood icon proxy blocked url=' . $requestedUrl);
         http_response_code(403);
         header('Content-Type: text/plain');
-        echo 'Host not allowed: ' . $host;
+        echo 'Host not allowed';
         exit;
     }
-    
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-    curl_setopt($ch, CURLOPT_MAXREDIRS, 3);
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
-    curl_setopt($ch, CURLOPT_ENCODING, '');
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Accept: image/*',
-        'User-Agent: WHMCS-PaymentHood-IconProxy/1.0',
-    ]);
-    
-    $body = curl_exec($ch);
-    $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $contentType = (string) curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
-    $error = curl_error($ch);
-    $errno = curl_errno($ch);
-    curl_close($ch);
-    
-    // Log all proxy requests for debugging
-    error_log(sprintf(
-        'PaymentHood icon proxy: URL=%s, HTTP=%d, Type=%s, Size=%d, Error=%s',
-        $url,
-        $httpCode,
-        $contentType,
-        $body === false ? -1 : strlen($body),
-        $error ?: 'none'
-    ));
-    
-    if ($body === false || $httpCode < 200 || $httpCode >= 300 || strlen($body) === 0) {
+
+    // Follows redirects manually, re-running the allowlist on every hop.
+    $result = paymenthood_iconProxyFetch($target['url']);
+
+    if (!$result['ok']) {
+        error_log(sprintf(
+            'PaymentHood icon proxy upstream failure: host=%s, HTTP=%d, error=%s',
+            $target['host'],
+            $result['status'],
+            $result['error'] !== '' ? $result['error'] : 'none'
+        ));
+
         http_response_code(502);
         header('Content-Type: text/plain');
-        $msg = 'Upstream failed';
-        if ($error) {
-            $msg .= ': ' . $error . ' (errno: ' . $errno . ')';
-        } elseif ($httpCode > 0) {
-            $msg .= ' (HTTP ' . $httpCode . ')';
-        }
-        echo $msg;
+        echo 'Upstream failed';
         exit;
     }
-    
-    // Fix content type if wrong
-    if ($contentType === '' || $contentType === 'application/octet-stream') {
-        $ext = strtolower(pathinfo($parts['path'] ?? '', PATHINFO_EXTENSION));
-        if ($ext === 'svg') {
-            $contentType = 'image/svg+xml';
-        } elseif ($ext === 'png') {
-            $contentType = 'image/png';
-        } elseif ($ext === 'jpg' || $ext === 'jpeg') {
-            $contentType = 'image/jpeg';
-        } else {
-            $contentType = 'image/*';
-        }
+
+    $finalPath = parse_url($result['url'], PHP_URL_PATH);
+    $contentType = paymenthood_iconProxyResolveContentType(
+        $result['type'],
+        $finalPath === null ? '' : $finalPath
+    );
+
+    if ($contentType === false) {
+        error_log(sprintf(
+            'PaymentHood icon proxy rejected content type: host=%s, type=%s',
+            $target['host'],
+            $result['type']
+        ));
+
+        http_response_code(502);
+        header('Content-Type: text/plain');
+        echo 'Unsupported content type';
+        exit;
     }
-    
-    // Normalize SVG content type (preserve charset if present)
-    if (stripos($contentType, 'svg') !== false && stripos($contentType, 'image/') === false) {
-        $contentType = 'image/svg+xml' . (stripos($contentType, 'charset') !== false ? '; charset=utf-8' : '');
-    }
-    
+
     // Clear any output buffers before sending image
     while (ob_get_level() > 0) {
         ob_end_clean();
     }
-    
-    // Debug mode: return info instead of image
-    if (!empty($_GET['debug'])) {
-        header('Content-Type: application/json');
-        echo json_encode([
-            'url' => $url,
-            'httpCode' => $httpCode,
-            'contentType' => $contentType,
-            'bodyLength' => strlen($body),
-            'bodyPreview' => substr($body, 0, 200),
-            'bodyHash' => md5($body)
-        ], JSON_PRETTY_PRINT);
-        exit;
-    }
-    
-    header('Content-Type: ' . $contentType);
-    header('Content-Length: ' . strlen($body));
-    header('Cache-Control: public, max-age=86400');
-    header('X-Content-Type-Options: nosniff');
-    header('Access-Control-Allow-Origin: *');
-    echo $body;
+
+    paymenthood_iconProxySendHeaders($contentType, strlen($result['body']));
+    echo $result['body'];
     exit;
 }
 

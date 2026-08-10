@@ -537,6 +537,42 @@ function paymenthood_appendInvoiceNote($invoiceId, $text)
     }
 }
 
+/**
+ * POST to a PaymentHood refund endpoint.
+ *
+ * Both /refund and /mark-as-refund take every argument as a query parameter
+ * and no request body, so this only needs the fully-built URL.
+ *
+ * @return array{body: string, httpCode: int, data: array}
+ */
+function paymenthood_refundApiPost($url, $token)
+{
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, '');
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        "Authorization: Bearer {$token}",
+        'Content-Type: application/json',
+        'Accept: application/json',
+    ]);
+
+    $body = curl_exec($ch);
+    $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    $body = $body === false ? '' : (string) $body;
+    $data = json_decode($body, true);
+
+    return [
+        'body'     => $body,
+        'httpCode' => $httpCode,
+        'data'     => is_array($data) ? $data : [],
+    ];
+}
+
 function paymenthood_refund($params)
 {
     try {
@@ -625,42 +661,109 @@ function paymenthood_refund($params)
         $paymentId = $paymentData['paymentId'];
         $canRefund = $paymentData['canRefund'] ?? false;
 
-        // 3. Process refund based on canRefund flag
+        // Authenticator code the operator typed into the refund form, if any.
+        // Both endpoints accept it as an optional `otpCode` query parameter.
+        $otpCode = PaymentHoodHandler::readRefundOtpCode();
+
+        // 3. Build the request. Both endpoints live on the App API and take
+        //    their arguments as query parameters, with no request body.
         if ($canRefund) {
-            // Use Payment API refund endpoint (actual refund through provider)
-            $refundUrl = PaymentHoodHandler::paymenthood_getPaymentBaseUrl()
-                . "/apps/{$appId}/payments/{$paymentId}/refund";
+            // Real refund through the provider.
+            $action = 'refund';
+            $path = "/apps/{$appId}/payments/{$paymentId}/refund";
+            $query = [];
+        } else {
+            // Book-only refund; the money is returned to the customer by hand.
+            $action = 'mark-as-refund';
+            $path = "/apps/{$appId}/payments/{$paymentId}/mark-as-refund";
+            // `description` is REQUIRED on this endpoint.
+            $query = ['description' => 'WHMCS Refund Request - Invoice #' . $invoiceId];
+        }
 
-            $ch = curl_init($refundUrl);
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($ch, CURLOPT_POST, true);
-            curl_setopt($ch, CURLOPT_HTTPHEADER, [
-                "Authorization: Bearer {$token}",
-                "Content-Type: application/json"
-            ]);
-            $apiResponse = curl_exec($ch);
-            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            curl_close($ch);
+        if ($otpCode !== '') {
+            $query['otpCode'] = $otpCode;
+        }
 
-            $response = json_decode($apiResponse, true) ?: [];
-            $response['_httpCode'] = $httpCode;
+        $requestUrl = PaymentHoodHandler::paymenthood_getPaymentAppBaseUrl() . $path;
+        if ($query !== []) {
+            $requestUrl .= '?' . http_build_query($query);
+        }
 
-            PaymentHoodHandler::safeLogModuleCall('gateway_refund_execute', [
+        $call = paymenthood_refundApiPost($requestUrl, $token);
+        $response = $call['data'];
+        $httpCode = $call['httpCode'];
+        $response['_httpCode'] = $httpCode;
+
+        PaymentHoodHandler::safeLogModuleCall('gateway_refund_execute', [
+            'paymentId' => $paymentId,
+            'action' => $action,
+            // Never log the URL directly: it carries the operator's otpCode.
+            'url' => PaymentHoodHandler::paymenthood_getPaymentAppBaseUrl() . $path,
+            'method' => 'POST',
+            'otpSupplied' => $otpCode !== '',
+        ], [
+            'httpCode' => $httpCode,
+            'paymentState' => $response['paymentState'] ?? null,
+            'refundId' => $response['refundId'] ?? null,
+        ]);
+
+        // 4. Two-factor gate. Both endpoints answer with a typed exception
+        //    envelope instead of a plain status, so this must be checked
+        //    before any success/failure interpretation.
+        $twoFactor = PaymentHoodHandler::detectTwoFactorError($call['body']);
+
+        if ($twoFactor === PaymentHoodHandler::REFUND_2FA_NEEDS_ACTIVATION) {
+            $message = 'PaymentHood refused the refund: two-factor authentication is not enabled on your '
+                . 'PaymentHood operator account. Enable Google Authenticator at '
+                . PaymentHoodHandler::paymenthood_ConsoleUrl()
+                . ', then retry this refund. No money has been moved.';
+
+            PaymentHoodHandler::flagRefund2fa(
+                PaymentHoodHandler::REFUND_2FA_NEEDS_ACTIVATION,
+                $invoiceId,
+                $message
+            );
+
+            PaymentHoodHandler::safeLogModuleCall('gateway_refund_2fa_not_activated', [
+                'invoiceId' => $invoiceId,
                 'paymentId' => $paymentId,
-                'url' => $refundUrl,
-                'method' => 'POST'
-            ], [
-                'httpCode' => $response['_httpCode'] ?? null,
-                'status' => $response['status'] ?? null,
-                'refundId' => $response['refundId'] ?? null
-            ]);
+                'action' => $action,
+            ], ['httpCode' => $httpCode]);
 
-            // Check if refund was successful
+            return ['status' => 'error', 'rawdata' => $message];
+        }
+
+        if ($twoFactor === PaymentHoodHandler::REFUND_2FA_INVALID_CODE) {
+            $message = $otpCode === ''
+                ? 'This refund requires a two-factor authentication code. Enter the 6-digit code from '
+                    . 'your Google Authenticator app and submit the refund again. No money has been moved.'
+                : 'The two-factor authentication code was rejected — it is incorrect or has expired. '
+                    . 'Enter a fresh 6-digit code from your Google Authenticator app and try again. '
+                    . 'No money has been moved.';
+
+            PaymentHoodHandler::flagRefund2fa(
+                PaymentHoodHandler::REFUND_2FA_INVALID_CODE,
+                $invoiceId,
+                $message
+            );
+
+            PaymentHoodHandler::safeLogModuleCall('gateway_refund_2fa_required', [
+                'invoiceId' => $invoiceId,
+                'paymentId' => $paymentId,
+                'action' => $action,
+                'otpSupplied' => $otpCode !== '',
+            ], ['httpCode' => $httpCode]);
+
+            return ['status' => 'error', 'rawdata' => $message];
+        }
+
+        // 5. Interpret the result.
+        if ($canRefund) {
             $refundStatus = $response['paymentState'] ?? '';
+
             if ($refundStatus === 'Refunded' || $refundStatus === 'Refunding') {
                 $refundTransactionId = $response['refundId'] ?? ('refund_' . $paymentId);
 
-                // Append note to invoice about the refund
                 paymenthood_appendInvoiceNote($invoiceId, 'Refund processed via PaymentHood (Transaction: ' . $refundTransactionId . '). Amount: $' . number_format($refundAmount, 2) . ' ' . $currency . '. Please manually update invoice status if needed.');
 
                 PaymentHoodHandler::safeLogModuleCall('gateway_refund_success', [
@@ -680,72 +783,32 @@ function paymenthood_refund($params)
                 ];
             }
 
-            throw new \Exception('Refund failed. Status: ' . $refundStatus);
-
-        } else {
-            // Use App API mark as refund endpoint (manual/external refund)
-            $markRefundUrl = PaymentHoodHandler::paymenthood_getPaymentAppBaseUrl()
-                . "/apps/{$appId}/payments/{$paymentId}/mark-as-refund";
-
-            $markRefundPayload = [
-                'amount' => $refundAmount,
-                'currency' => $currency,
-                'reason' => 'WHMCS Refund Request - Invoice #' . $invoiceId,
-            ];
-
-            $ch = curl_init($markRefundUrl);
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($ch, CURLOPT_POST, true);
-            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($markRefundPayload));
-            curl_setopt($ch, CURLOPT_HTTPHEADER, [
-                "Authorization: Bearer {$token}",
-                "Content-Type: application/json"
-            ]);
-            $apiResponse = curl_exec($ch);
-            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            curl_close($ch);
-
-            $response = json_decode($apiResponse, true) ?: [];
-            $response['_httpCode'] = $httpCode;
-
-            PaymentHoodHandler::safeLogModuleCall('gateway_refund_mark_as_refund', [
-                'paymentId' => $paymentId,
-                'url' => $markRefundUrl,
-                'method' => 'POST',
-                'amount' => $markRefundPayload['amount'],
-                'currency' => $markRefundPayload['currency']
-            ], [
-                'httpCode' => $response['_httpCode'] ?? null,
-                'success' => ($response['_httpCode'] >= 200 && $response['_httpCode'] < 300)
-            ]);
-
-            // Check if mark as refund was successful
-            $httpCode = $response['_httpCode'] ?? 0;
-            if ($httpCode >= 200 && $httpCode < 300) {
-                $refundTransactionId = 'manual_refund_' . $paymentId;
-
-                // Append note to invoice about the manual refund
-                paymenthood_appendInvoiceNote($invoiceId, 'MARKED AS REFUNDED via PaymentHood (Transaction: ' . $refundTransactionId . '). Amount: $' . number_format($refundAmount, 2) . ' ' . $currency . '. WARNING: Money was NOT automatically returned to customer - YOU MUST REFUND MANUALLY. Please update invoice status after manual refund is completed.');
-
-                PaymentHoodHandler::safeLogModuleCall('gateway_refund_success', [
-                    'invoiceId' => $invoiceId,
-                    'paymentId' => $paymentId,
-                    'amount' => $refundAmount
-                ], [
-                    'refundId' => $refundTransactionId,
-                    'manualRefund' => true
-                ]);
-
-                // WHMCS handles refund recording automatically
-                return [
-                    'status' => 'success',
-                    'transid' => $refundTransactionId,
-                    'rawdata' => $response
-                ];
-            }
-
-            throw new \Exception('Mark as refund failed. HTTP Code: ' . $httpCode);
+            throw new \Exception('Refund failed. Status: ' . ($refundStatus !== '' ? $refundStatus : 'HTTP ' . $httpCode));
         }
+
+        if ($httpCode >= 200 && $httpCode < 300) {
+            $refundTransactionId = 'manual_refund_' . $paymentId;
+
+            paymenthood_appendInvoiceNote($invoiceId, 'MARKED AS REFUNDED via PaymentHood (Transaction: ' . $refundTransactionId . '). Amount: $' . number_format($refundAmount, 2) . ' ' . $currency . '. WARNING: Money was NOT automatically returned to customer - YOU MUST REFUND MANUALLY. Please update invoice status after manual refund is completed.');
+
+            PaymentHoodHandler::safeLogModuleCall('gateway_refund_success', [
+                'invoiceId' => $invoiceId,
+                'paymentId' => $paymentId,
+                'amount' => $refundAmount
+            ], [
+                'refundId' => $refundTransactionId,
+                'manualRefund' => true
+            ]);
+
+            // WHMCS handles refund recording automatically
+            return [
+                'status' => 'success',
+                'transid' => $refundTransactionId,
+                'rawdata' => $response
+            ];
+        }
+
+        throw new \Exception('Mark as refund failed. HTTP Code: ' . $httpCode);
 
     } catch (\Throwable $e) {
         PaymentHoodHandler::safeLogModuleCall(
