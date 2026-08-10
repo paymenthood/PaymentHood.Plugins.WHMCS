@@ -13,9 +13,6 @@
  *      a modal. The code the operator types is written into WHMCS's own refund
  *      form, which is then resubmitted — so the retry goes through WHMCS's
  *      native refund path and its bookkeeping stays intact.
- *
- * NeedToActive2FaException is not recoverable here: the operator has no
- * authenticator enrolled, so this renders a message instead of a prompt.
  */
 
 require_once __DIR__ . '/../../modules/addons/paymenthood/paymenthoodhandler.php';
@@ -37,8 +34,6 @@ add_hook('AdminAreaFooterOutput', 1, function ($vars) {
             'reason'     => $reason,
             'message'    => $message,
             'invoiceId'  => $invoiceId,
-            'consoleUrl' => PaymentHoodHandler::paymenthood_ConsoleUrl(),
-            'needsSetup' => $reason === PaymentHoodHandler::REFUND_2FA_NEEDS_ACTIVATION,
         ], JSON_UNESCAPED_SLASHES);
 
         if ($config === false) {
@@ -64,8 +59,6 @@ add_hook('AdminAreaFooterOutput', 1, function ($vars) {
 .ph2fa-btn-primary{background:#2563eb;color:#fff;}
 .ph2fa-btn-primary:disabled{background:#93b4f5;cursor:not-allowed;}
 .ph2fa-btn-plain{background:#f1f5f9;color:#334155;border-color:#cbd5e1;}
-.ph2fa-note{padding:11px 13px;border-radius:7px;background:#fef3c7;color:#78350f;font-size:12.5px;
- line-height:1.5;margin:0 0 12px;}
 </style>
 <script>
 (function () {
@@ -121,35 +114,22 @@ add_hook('AdminAreaFooterOutput', 1, function ($vars) {
         var backdrop = document.createElement('div');
         backdrop.className = 'ph2fa-backdrop';
 
-        var setupNote = CONFIG.needsSetup
-            ? '<div class="ph2fa-note">' + escapeHtml(CONFIG.message) + '</div>'
-            : '';
+        var prompt = '<p>' + escapeHtml(CONFIG.message) + '</p>'
+            // No maxlength: it would truncate a pasted value before the
+            // digit-stripper below runs, silently eating part of the code.
+            // The input handler caps the length instead.
+            + '<input class="ph2fa-code" id="ph2fa-code" type="text" inputmode="numeric" '
+            + 'autocomplete="one-time-code" placeholder="000000" aria-label="Authenticator code">'
+            + '<div class="ph2fa-err" id="ph2fa-err"></div>';
 
-        var prompt = CONFIG.needsSetup
-            ? '<p>Refunds require two-factor authentication. Contact your administrator, or '
-              + 'open the PaymentHood console yourself, to enable Google Authenticator on this account.</p>'
-              + '<p><a href="' + escapeAttr(CONFIG.consoleUrl) + '" target="_blank" rel="noopener noreferrer">'
-              + 'Open the PaymentHood console</a></p>'
-              + '<p>Once it is enabled, return here and submit the refund again.</p>'
-            : '<p>' + escapeHtml(CONFIG.message) + '</p>'
-              // No maxlength: it would truncate a pasted value before the
-              // digit-stripper below runs, silently eating part of the code.
-              // The input handler caps the length instead.
-              + '<input class="ph2fa-code" id="ph2fa-code" type="text" inputmode="numeric" '
-              + 'autocomplete="one-time-code" placeholder="000000" aria-label="Authenticator code">'
-              + '<div class="ph2fa-err" id="ph2fa-err"></div>';
-
-        var buttons = CONFIG.needsSetup
-            ? '<button type="button" class="ph2fa-btn ph2fa-btn-plain" id="ph2fa-close">Close</button>'
-            : '<button type="button" class="ph2fa-btn ph2fa-btn-plain" id="ph2fa-close">Cancel</button>'
-              + '<button type="button" class="ph2fa-btn ph2fa-btn-primary" id="ph2fa-submit" disabled>Confirm refund</button>';
+        var buttons =
+            '<button type="button" class="ph2fa-btn ph2fa-btn-plain" id="ph2fa-close">Cancel</button>'
+            + '<button type="button" class="ph2fa-btn ph2fa-btn-primary" id="ph2fa-submit" disabled>Confirm refund</button>';
 
         backdrop.innerHTML =
             '<div class="ph2fa-modal" role="dialog" aria-modal="true" aria-labelledby="ph2fa-title">'
-            + '<div class="ph2fa-head" id="ph2fa-title">'
-            + (CONFIG.needsSetup ? 'Two-factor authentication required' : 'Enter your authenticator code')
-            + '</div>'
-            + '<div class="ph2fa-body">' + setupNote + prompt + '</div>'
+            + '<div class="ph2fa-head" id="ph2fa-title">Enter your authenticator code</div>'
+            + '<div class="ph2fa-body">' + prompt + '</div>'
             + '<div class="ph2fa-foot">' + buttons + '</div>'
             + '</div>';
 
@@ -160,10 +140,6 @@ add_hook('AdminAreaFooterOutput', 1, function ($vars) {
         return String(value == null ? '' : value)
             .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
-    }
-
-    function escapeAttr(value) {
-        return escapeHtml(value).replace(/`/g, '&#096;');
     }
 
     function open() {
@@ -184,10 +160,6 @@ add_hook('AdminAreaFooterOutput', 1, function ($vars) {
         document.addEventListener('keydown', function onEsc(event) {
             if (event.key === 'Escape') { close(); document.removeEventListener('keydown', onEsc); }
         });
-
-        if (CONFIG.needsSetup) {
-            return;
-        }
 
         var codeInput = backdrop.querySelector('#ph2fa-code');
         var submitBtn = backdrop.querySelector('#ph2fa-submit');

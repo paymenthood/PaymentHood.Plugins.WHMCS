@@ -20,6 +20,10 @@ require_once __DIR__ . '/../../modules/addons/paymenthood/paymenthoodhandler.php
  * Every bail-out after the page check is logged, because a silently absent
  * button is impossible to diagnose from the outside.
  */
+// Guarded: WHMCS can include a hook file more than once, and a redeclare is a
+// fatal that would take the hook (and the page) down.
+if (!function_exists('paymenthood_renderOrderPaymentLink')) {
+
 function paymenthood_renderOrderPaymentLink($vars)
 {
     try {
@@ -44,11 +48,26 @@ function paymenthood_renderOrderPaymentLink($vars)
             return '';
         }
 
+        // Emit the reason to the browser console as well as the module log.
+        // A button that is simply absent gives nobody anything to work from;
+        // this makes every skip visible where the page is being inspected.
         $bail = function ($reason, $context = []) use ($orderId) {
             PaymentHoodHandler::safeLogModuleCall('admin_order_link_skipped', array_merge([
                 'orderId' => $orderId,
             ], $context), ['reason' => $reason]);
-            return '';
+
+            $payload = json_encode([
+                'orderId' => $orderId,
+                'reason'  => $reason,
+                'context' => $context,
+            ], JSON_UNESCAPED_SLASHES);
+
+            if ($payload === false) {
+                return '';
+            }
+
+            return '<script>try{console.warn("[PaymentHood] order link skipped:",'
+                . $payload . ');}catch(e){}</script>';
         };
 
         $order = Capsule::table('tblorders')
@@ -127,10 +146,25 @@ function paymenthood_renderOrderPaymentLink($vars)
             . '/' . rawurlencode($appId)
             . '/payments/' . rawurlencode($paymentId);
 
+        // The gateway's display name, used to locate the Payment Method cell on
+        // the page. Admins can rename the gateway, so read it rather than
+        // assuming "PaymentHood".
+        $displayName = trim((string) Capsule::table('tblpaymentgateways')
+            ->where('gateway', 'paymenthood')
+            ->where('setting', 'name')
+            ->value('value'));
+
+        $names = array_values(array_unique(array_filter([
+            $displayName,
+            'PaymentHood',
+            'paymenthood',
+        ])));
+
         $payload = json_encode([
             'url'       => $detailUrl,
             'paymentId' => $paymentId,
             'invoiceId' => $invoiceId,
+            'names'     => $names,
         ], JSON_UNESCAPED_SLASHES);
 
         if ($payload === false) {
@@ -166,41 +200,93 @@ function paymenthood_renderOrderPaymentLink($vars)
         return a;
     }
 
-    // Ordered placements, best first. Each returns a plan or null.
+    // Ordered placements, best first. Each returns a plan or null. The list
+    // ends with document.body, so SOME placement always succeeds — an earlier
+    // version stopped at theme-specific selectors and rendered nothing at all
+    // on layouts that had none of them.
     var placements = [
-        // 1. Beside this order's invoice link. That is where an admin looks for
-        //    payment information, and the invoice id is known server-side so it
-        //    can be matched without depending on any theme's markup.
-        function () {
-            var link = document.querySelector(
-                'a[href*="invoices.php"][href*="id=' + CFG.invoiceId + '"]'
-            );
-            if (!link || !link.parentNode) { return null; }
-            return { host: link.parentNode, ref: link.nextSibling };
+        {
+            name: 'payment method cell',
+            // Directly after the gateway name in the Payment Method row, which
+            // is where the payment actually belongs on this page.
+            find: function () {
+                // Editable form first: some order views render a select.
+                var select = document.querySelector('select[name="paymentmethod"], select[name="gateway"]');
+                if (select && select.parentNode) {
+                    return { host: select.parentNode, ref: select.nextSibling };
+                }
+
+                // Read-only: the leaf cell whose entire text is the gateway's
+                // display name. Leaf-only avoids matching an outer container
+                // that merely contains the name somewhere inside it.
+                var cells = document.querySelectorAll('td, th');
+                for (var i = 0; i < cells.length; i++) {
+                    var cell = cells[i];
+                    if (cell.querySelector('table, td, th')) { continue; }
+
+                    var text = (cell.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+                    for (var j = 0; j < CFG.names.length; j++) {
+                        if (text === String(CFG.names[j]).toLowerCase()) {
+                            return { host: cell, ref: null };
+                        }
+                    }
+                }
+                return null;
+            }
         },
-        // 2. Inside the first content panel, as its own row.
-        function () {
-            var body = document.querySelector(
-                '#main-body .panel-body, .contentarea .panel-body, .panel-body'
-            );
-            return body ? { host: body, ref: null, ownRow: true } : null;
+        {
+            name: 'beside invoice link',
+            // Where an admin looks for payment info, and locatable in any
+            // theme because the invoice id is known server-side.
+            find: function () {
+                var link = document.querySelector(
+                    'a[href*="invoices.php"][href*="id=' + CFG.invoiceId + '"]'
+                );
+                if (!link || !link.parentNode) { return null; }
+                return { host: link.parentNode, ref: link.nextSibling };
+            }
         },
-        // 3. End of the content area — still inside the card, not floating.
-        function () {
-            var area = document.querySelector('#main-body .contentarea, .contentarea, #main-body');
-            return area ? { host: area, ref: null, ownRow: true } : null;
+        {
+            name: 'order summary table',
+            find: function () {
+                var cell = document.querySelector(
+                    'table td a[href*="invoices.php"], table td a[href*="clientssummary.php"]'
+                );
+                if (!cell) { return null; }
+                var row = cell.closest ? cell.closest('tr') : null;
+                if (!row || !row.parentNode) { return null; }
+                return { host: row.parentNode, ref: row.nextSibling, ownRow: true, asRow: true };
+            }
         },
-        // 4. Straight after the page heading. Inside the content flow of
-        //    essentially any layout, including themes not recognised above.
-        function () {
-            var heading = document.querySelector('h1, .pageheader, .page-header');
-            if (!heading || !heading.parentNode) { return null; }
-            return { host: heading.parentNode, ref: heading.nextSibling, ownRow: true };
+        {
+            name: 'panel body',
+            find: function () {
+                var body = document.querySelector('.panel-body, .card-body, .widget-content');
+                return body ? { host: body, ref: body.firstChild, ownRow: true } : null;
+            }
         },
-        // 5. Last resort: end of the document. Not pretty, but a reachable
-        //    button beats a silently missing one.
-        function () {
-            return document.body ? { host: document.body, ref: null, ownRow: true } : null;
+        {
+            name: 'content area',
+            find: function () {
+                var area = document.querySelector(
+                    '#main-body .contentarea, .contentarea, #main-body, #content, .content-wrapper'
+                );
+                return area ? { host: area, ref: area.firstChild, ownRow: true } : null;
+            }
+        },
+        {
+            name: 'after page heading',
+            find: function () {
+                var heading = document.querySelector('h1, .pageheader, .page-header, h2');
+                if (!heading || !heading.parentNode) { return null; }
+                return { host: heading.parentNode, ref: heading.nextSibling, ownRow: true };
+            }
+        },
+        {
+            name: 'document body (fallback)',
+            find: function () {
+                return document.body ? { host: document.body, ref: document.body.firstChild, ownRow: true } : null;
+            }
         }
     ];
 
@@ -209,20 +295,43 @@ function paymenthood_renderOrderPaymentLink($vars)
 
         for (var i = 0; i < placements.length; i++) {
             var plan = null;
-            try { plan = placements[i](); } catch (e) { plan = null; }
+            try { plan = placements[i].find(); } catch (e) { plan = null; }
             if (!plan || !plan.host) { continue; }
 
             var node = makeButton();
 
-            if (plan.ownRow) {
+            if (plan.asRow) {
+                // Host is a table section; a bare <div> there is invalid and
+                // browsers hoist it out of the table.
+                var tr = document.createElement('tr');
+                var td = document.createElement('td');
+                td.colSpan = 2;
+                td.appendChild(node);
+                tr.appendChild(td);
+                node = tr;
+            } else if (plan.ownRow) {
                 var row = document.createElement('div');
                 row.className = 'ph-order-row';
                 row.appendChild(node);
                 node = row;
             }
 
-            plan.host.insertBefore(node, plan.ref || null);
+            try {
+                plan.host.insertBefore(node, plan.ref || null);
+            } catch (e) {
+                continue;
+            }
+
+            // Says which placement won, so a bad position can be reported
+            // without guessing at the theme's markup.
+            if (window.console && console.log) {
+                console.log('[PaymentHood] order link placed via: ' + placements[i].name);
+            }
             return;
+        }
+
+        if (window.console && console.warn) {
+            console.warn('[PaymentHood] order link could not be placed');
         }
     }
 
@@ -246,6 +355,8 @@ HTML;
         return '';
     }
 }
+
+} // function_exists guard
 
 // Registered on both output points. Whichever fires first renders the button;
 // the JS refuses to add a second one. Themes and WHMCS versions differ in

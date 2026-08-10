@@ -783,32 +783,11 @@ function paymenthood_refund($params)
             ]);
         }
 
-        // 4. Two-factor gate. Both endpoints answer with a typed exception
+        // 4. Two-factor gate. The endpoints answer with a typed exception
         //    envelope instead of a plain status, so this must be checked
-        //    before any success/failure interpretation.
+        //    before any success/failure interpretation. Anything other than a
+        //    rejected code falls through to the ordinary failure path below.
         $twoFactor = PaymentHoodHandler::detectTwoFactorError($call['body']);
-
-        if ($twoFactor === PaymentHoodHandler::REFUND_2FA_NEEDS_ACTIVATION) {
-            $message = 'Two-factor authentication is not enabled on your PaymentHood account. '
-                . 'You must activate 2FA in the PaymentHood console before you can issue refunds. '
-                . 'Contact your administrator, or open the PaymentHood console at '
-                . PaymentHoodHandler::paymenthood_ConsoleUrl() . ' to enable it, then retry this refund. '
-                . 'No money has been moved.';
-
-            PaymentHoodHandler::flagRefund2fa(
-                PaymentHoodHandler::REFUND_2FA_NEEDS_ACTIVATION,
-                $invoiceId,
-                $message
-            );
-
-            PaymentHoodHandler::safeLogModuleCall('gateway_refund_2fa_not_activated', [
-                'invoiceId' => $invoiceId,
-                'paymentId' => $paymentId,
-                'action' => $action,
-            ], ['httpCode' => $httpCode]);
-
-            return ['status' => 'error', 'rawdata' => $message];
-        }
 
         if ($twoFactor === PaymentHoodHandler::REFUND_2FA_INVALID_CODE) {
             $message = $otpCode === ''

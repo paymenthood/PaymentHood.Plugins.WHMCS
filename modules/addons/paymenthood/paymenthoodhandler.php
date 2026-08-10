@@ -1716,19 +1716,16 @@ class PaymentHoodHandler
 
     // ── Refund two-factor authentication ────────────────────────────────
     //
-    // The refund and mark-as-refund endpoints are 2FA-protected. They answer
-    // with a typed exception envelope rather than a plain HTTP status:
+    // The refund and mark-as-refund endpoints are 2FA-protected. A missing or
+    // wrong code comes back as a typed exception envelope rather than a plain
+    // HTTP status:
     //
-    //   {"TypeName":"NeedToActive2FaException", "TypeFullName":"...", ...}
-    //   {"TypeName":"Invalid2FaException",      "TypeFullName":"...", ...}
+    //   {"TypeName":"Invalid2FaException", "TypeFullName":"...", ...}
     //
-    // NeedToActive2Fa  -> the operator has no authenticator enrolled at all.
-    //                     Nothing the module can do; they must enrol first.
-    // Invalid2Fa       -> enrolled, but no/incorrect otpCode was sent.
-    //                     Recoverable: prompt for a code and retry.
+    // That case is recoverable: prompt for a code and retry. Any other API
+    // error goes through the ordinary refund failure path.
 
-    const REFUND_2FA_NEEDS_ACTIVATION = 'needs_activation';
-    const REFUND_2FA_INVALID_CODE     = 'invalid_code';
+    const REFUND_2FA_INVALID_CODE = 'invalid_code';
 
     /** Session key holding a one-shot prompt flag for the admin UI. */
     const REFUND_2FA_SESSION_KEY = 'paymenthood_refund_2fa';
@@ -1766,12 +1763,6 @@ class PaymentHoodHandler
         // Prefer the typed field; fall back to the raw body so a wrapped or
         // re-serialised envelope is still recognised.
         $haystacks = $typeNames !== [] ? $typeNames : [$raw];
-
-        foreach ($haystacks as $haystack) {
-            if (stripos($haystack, 'NeedToActive2FaException') !== false) {
-                return self::REFUND_2FA_NEEDS_ACTIVATION;
-            }
-        }
 
         foreach ($haystacks as $haystack) {
             if (stripos($haystack, 'Invalid2FaException') !== false) {
