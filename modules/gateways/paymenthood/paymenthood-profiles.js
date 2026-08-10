@@ -28,24 +28,25 @@
         if (!_templateDoc) { return null; }
         var tpl = _templateDoc.getElementById(id);
         if (!tpl || !tpl.content) { return null; }
-        var clone = tpl.content.cloneNode(true);
         if (replacements) {
-            // Replace placeholders in the serialised HTML then re-parse so
-            // attribute values (data-profile-id, src, alt …) are covered too.
-            var tmp = document.createElement('div');
-            tmp.appendChild(clone);
-            var markup = tmp.innerHTML;
+            // Substitute against the template's RAW markup, before anything is
+            // turned into elements. Materialising first (appendChild of the
+            // clone) makes the browser immediately fetch the literal
+            // "{{proxyIconUrl}}" as a URL — a guaranteed 404 on every render —
+            // because an <img src> starts loading even while detached.
+            var markup = tpl.innerHTML;
             Object.keys(replacements).forEach(function(key) {
                 // Escape the replacement value for safe insertion into HTML
                 markup = markup.split('{{' + key + '}}').join(escapeHtml(replacements[key]));
             });
+            var tmp = document.createElement('div');
             tmp.innerHTML = markup;
             // Return a DocumentFragment
             var frag = document.createDocumentFragment();
             while (tmp.firstChild) { frag.appendChild(tmp.firstChild); }
             return frag;
         }
-        return clone;
+        return tpl.content.cloneNode(true);
     }
 
     /** Shortcut: get a template's outer HTML string (for innerHTML assignment) */
@@ -114,6 +115,16 @@
             return 'https:' + url;
         }
         return url;
+    }
+
+    /** Is this the synthesized card row (as opposed to a hosted-page provider)? */
+    function isCardProfile(profile) {
+        if (!profile) {
+            return false;
+        }
+        var method = String(profile.checkoutMethod || '').toLowerCase();
+        var provider = String((profile.paymentProvider && profile.paymentProvider.provider) || '').toLowerCase();
+        return method === 'creditcard' || provider === 'creditcard';
     }
 
     function getProxiedIconUrl(url) {
@@ -233,6 +244,14 @@
                 if (direct && !img.__phFellBack && img.src !== direct) {
                     img.__phFellBack = true;
                     img.src = direct;
+                } else if (img.getAttribute('data-ph-builtin-fallback') === '1' && !img.__phBuiltin) {
+                    // Both URLs failed on a card row: swap in the built-in
+                    // artwork so the row is never left without an icon.
+                    img.__phBuiltin = true;
+                    var builtin = getTemplate('ph-tpl-profile-icon-builtin');
+                    if (builtin && img.parentNode) {
+                        img.parentNode.replaceChild(builtin, img);
+                    }
                 }
 
                 // Only report the first failure per image.
@@ -681,15 +700,32 @@
             });
 
             if (itemFrag) {
-                // Inject icon if available
-                if (proxyIconUrl) {
-                    var iconFrag = getTemplate('ph-tpl-profile-icon', {
-                        proxyIconUrl: proxyIconUrl,
-                        directIconUrl: directIconUrl,
-                        alt: displayName
-                    });
-                    var iconSlot = itemFrag.querySelector('[data-ph-icon-slot]');
-                    if (iconSlot && iconFrag) {
+                var iconSlot = itemFrag.querySelector('[data-ph-icon-slot]');
+                if (iconSlot) {
+                    var iconFrag = null;
+
+                    if (proxyIconUrl) {
+                        iconFrag = getTemplate('ph-tpl-profile-icon', {
+                            proxyIconUrl: proxyIconUrl,
+                            directIconUrl: directIconUrl,
+                            alt: displayName
+                        });
+                        // Mark card rows so a failed load can drop back to the
+                        // built-in artwork. Other providers must not, or a
+                        // failed PayPal logo would render as a credit card.
+                        if (iconFrag && isCardProfile(profile)) {
+                            var imgEl = iconFrag.querySelector('img');
+                            if (imgEl) {
+                                imgEl.setAttribute('data-ph-builtin-fallback', '1');
+                            }
+                        }
+                    } else if (isCardProfile(profile)) {
+                        // The API returned no artwork for the card row. Draw our
+                        // own rather than leaving the row iconless.
+                        iconFrag = getTemplate('ph-tpl-profile-icon-builtin');
+                    }
+
+                    if (iconFrag) {
                         iconSlot.appendChild(iconFrag);
                     }
                 }

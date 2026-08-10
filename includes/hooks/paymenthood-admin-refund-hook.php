@@ -126,10 +126,11 @@ add_hook('AdminAreaFooterOutput', 1, function ($vars) {
             : '';
 
         var prompt = CONFIG.needsSetup
-            ? '<p>Once Google Authenticator is enabled on your PaymentHood operator account, '
-              + 'return here and submit the refund again.</p>'
+            ? '<p>Refunds require two-factor authentication. Contact your administrator, or '
+              + 'open the PaymentHood console yourself, to enable Google Authenticator on this account.</p>'
               + '<p><a href="' + escapeAttr(CONFIG.consoleUrl) + '" target="_blank" rel="noopener noreferrer">'
               + 'Open the PaymentHood console</a></p>'
+              + '<p>Once it is enabled, return here and submit the refund again.</p>'
             : '<p>' + escapeHtml(CONFIG.message) + '</p>'
               // No maxlength: it would truncate a pasted value before the
               // digit-stripper below runs, silently eating part of the code.

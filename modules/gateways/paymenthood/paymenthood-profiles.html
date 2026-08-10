@@ -53,3 +53,17 @@
          alt="{{alt}}"
          loading="eager">
 </template>
+
+<!-- Built-in card icon. Used for the CreditCard row when the API supplies no
+     iconUri, and as the last resort if both the proxy and the icon's own URL
+     fail. Inline SVG so it needs no network request and cannot go missing. -->
+<template id="ph-tpl-profile-icon-builtin">
+    <svg class="paymenthood-builtin-card" viewBox="0 0 60 40" width="60" height="40"
+         role="img" aria-label="Credit card" focusable="false">
+        <rect x="3.5" y="7.5" width="53" height="25" rx="3.5" fill="#ffffff" stroke="#94a3b8"/>
+        <rect x="3.5" y="13" width="53" height="6" fill="#475569"/>
+        <rect x="8" y="23" width="10" height="6.5" rx="1.5" fill="#e2e8f0" stroke="#94a3b8" stroke-width="0.75"/>
+        <rect x="22" y="26" width="14" height="2" rx="1" fill="#cbd5e1"/>
+        <rect x="39" y="26" width="8" height="2" rx="1" fill="#cbd5e1"/>
+    </svg>
+</template>

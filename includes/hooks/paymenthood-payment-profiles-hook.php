@@ -208,11 +208,27 @@ add_hook('ClientAreaHeadOutput', 1, function ($vars) {
         $ajaxUrl = $systemUrl . '/modules/gateways/' . rawurlencode($gateway) . '/get-payment-profiles.php';
         $iconProxyBase = $systemUrl . '/modules/gateways/' . rawurlencode($gateway) . '/get-payment-profiles.php?proxy=1&u=';
 
-        // Build URLs for external assets
+        // Build URLs for external assets.
+        //
+        // Each carries ?v=<file mtime>. Without it the browser keeps serving
+        // the previously cached .js/.css/.html after a plugin upload, so a new
+        // build appears to change nothing at all until the cache expires. The
+        // stamp changes whenever the file is re-uploaded, which is exactly when
+        // the cache must be invalidated.
         $gatewayAssetsBase = $systemUrl . '/modules/gateways/' . rawurlencode($gateway);
-        $cssUrl = $gatewayAssetsBase . '/paymenthood-profiles.css';
-        $jsUrl = $gatewayAssetsBase . '/paymenthood-profiles.js';
-        $templateUrl = $gatewayAssetsBase . '/paymenthood-profiles.html';
+        $assetDir = __DIR__ . '/../../modules/gateways/' . $gateway;
+
+        $assetUrl = function ($filename) use ($gatewayAssetsBase, $assetDir) {
+            $url = $gatewayAssetsBase . '/' . $filename;
+            $path = $assetDir . '/' . $filename;
+            $stamp = is_file($path) ? @filemtime($path) : false;
+
+            return $stamp === false ? $url : $url . '?v=' . $stamp;
+        };
+
+        $cssUrl = $assetUrl('paymenthood-profiles.css');
+        $jsUrl = $assetUrl('paymenthood-profiles.js');
+        $templateUrl = $assetUrl('paymenthood-profiles.html');
 
         // Build the JSON config that the external JS reads from window.PAYMENTHOOD_CONFIG
         $jsConfigData = [
