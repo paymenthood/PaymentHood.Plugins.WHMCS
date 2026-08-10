@@ -6,15 +6,17 @@
   "category": "payment-gateways",
   "description": {
     "name": "PaymentHood",
-    "tagline": "All-in-one payment orchestration platform unifying multiple gateways into one integration.",
-    "long": "PaymentHood unifies multiple payment gateways into a single integration, enabling businesses to accept global payments securely without complex development. This WHMCS plugin takes under five minutes to set up and supports one-time and subscription payments with automated payment verification.",
+    "tagline": "One payment integration for WHMCS. Connect 30+ providers and switch between them without changing your store.",
+    "long": "PaymentHood connects WHMCS to 30+ payment providers through a single module. You pick the active provider in the PaymentHood dashboard and WHMCS keeps working unchanged, so changing provider needs no reinstall and no reconfiguration.\n\nCard details are entered on your provider's own certified payment page. They never pass through PaymentHood or your WHMCS server. Activation runs over OAuth 2.0 and creates separate sandbox and live apps, so you can test before going live.\n\nOne-time invoices and recurring subscriptions are both supported. Where a provider supports payment agreements, WHMCS renewal invoices are charged automatically and failures are reported back through the standard WHMCS callback, so your existing retry and suspension rules still apply.\n\nPaymentHood charges no percentage and no per-transaction fee. You pay only the processing fees set by your chosen provider.",
     "features": [
-      "Unified payment orchestration - one API for multiple gateways",
-      "Automated subscription and recurring billing",
-      "Multi-currency and global payment methods support",
-      "Advanced fraud detection and smart routing",
-      "Real-time transaction insights and analytics",
-      "OAuth2 secure activation with sandbox and live modes"
+      "Connect 30+ payment providers through one WHMCS module",
+      "Change provider from the PaymentHood dashboard with no WHMCS changes",
+      "Automatic renewals - WHMCS subscription invoices charged via provider agreements",
+      "Card data entered on the provider's certified page, never on your server",
+      "OAuth 2.0 activation with separate sandbox and live apps",
+      "Refunds from the WHMCS admin area, plus a PaymentHood transactions report",
+      "No percentage or per-transaction fees from PaymentHood",
+      "Compatible with WHMCS 7.0 and later, including 8.x"
     ]
   },
   "logo": {
