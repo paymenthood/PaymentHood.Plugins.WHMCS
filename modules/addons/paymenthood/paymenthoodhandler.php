@@ -1804,17 +1804,71 @@ class PaymentHoodHandler
     /**
      * Record that the admin UI should prompt for a code on this page render.
      */
-    public static function flagRefund2fa(string $reason, int $invoiceId, string $message = ''): void
+    /**
+     * Make sure a session exists before touching $_SESSION.
+     *
+     * A gateway refund does not always run with a started session, and the
+     * prompt is useless if the flag is silently dropped.
+     */
+    private static function ensureSession(): bool
     {
-        if (session_status() !== PHP_SESSION_ACTIVE) {
-            return;
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            return true;
         }
 
-        $_SESSION[self::REFUND_2FA_SESSION_KEY] = [
+        if (session_status() === PHP_SESSION_DISABLED || headers_sent()) {
+            return false;
+        }
+
+        return @session_start();
+    }
+
+    /** Gateway-setting key used as the session-independent prompt store. */
+    const REFUND_2FA_STORE_SETTING = 'refund2faPrompt';
+
+    /** How long a stored prompt stays valid, in seconds. */
+    const REFUND_2FA_TTL = 180;
+
+    public static function flagRefund2fa(string $reason, int $invoiceId, string $message = ''): void
+    {
+        $flag = [
             'reason'    => $reason,
             'invoiceId' => $invoiceId,
             'message'   => $message,
+            'at'        => time(),
         ];
+
+        // Primary store is the gateway settings table, not the session. WHMCS
+        // may run the refund over AJAX, in which case no admin page is rendered
+        // during that request and a session flag would have to survive until
+        // the next one — assuming a session exists at all. The DB store has
+        // neither problem, and is already how app-inactive state is kept.
+        $stored = false;
+        try {
+            self::saveGatewaySetting(self::REFUND_2FA_STORE_SETTING, json_encode($flag));
+            // saveGatewaySetting handles its own errors and returns nothing, so
+            // read back rather than assume the write landed. This log line is
+            // the only way to tell a missing prompt from a failed store.
+            $stored = (string) self::getGatewaySetting(self::REFUND_2FA_STORE_SETTING) !== '';
+        } catch (\Throwable $e) {
+            $stored = false;
+        }
+
+        // Session too, so a prompt in the same request is picked up without a
+        // second DB read.
+        if (self::ensureSession()) {
+            $_SESSION[self::REFUND_2FA_SESSION_KEY] = $flag;
+        }
+
+        // Confirms the prompt was recorded, so a missing dialog can be traced
+        // to the admin hook rather than to the refund call.
+        self::safeLogModuleCall('refund_2fa_flag_set', [
+            'reason'    => $reason,
+            'invoiceId' => $invoiceId,
+        ], [
+            'storedInDb'      => $stored,
+            'storedInSession' => session_status() === PHP_SESSION_ACTIVE,
+        ]);
     }
 
     /**
@@ -1822,14 +1876,44 @@ class PaymentHoodHandler
      */
     public static function consumeRefund2faFlag()
     {
-        if (session_status() !== PHP_SESSION_ACTIVE || empty($_SESSION[self::REFUND_2FA_SESSION_KEY])) {
+        $flag = null;
+
+        if (self::ensureSession() && !empty($_SESSION[self::REFUND_2FA_SESSION_KEY])) {
+            $flag = $_SESSION[self::REFUND_2FA_SESSION_KEY];
+            unset($_SESSION[self::REFUND_2FA_SESSION_KEY]);
+        }
+
+        if (!is_array($flag)) {
+            $raw = self::getGatewaySetting(self::REFUND_2FA_STORE_SETTING);
+            $decoded = is_string($raw) && $raw !== '' ? json_decode($raw, true) : null;
+            if (is_array($decoded)) {
+                $flag = $decoded;
+            }
+        }
+
+        // Always clear the stored copy, including a stale one, so the prompt
+        // cannot reappear on later page loads.
+        $stored = self::getGatewaySetting(self::REFUND_2FA_STORE_SETTING);
+        if (is_string($stored) && $stored !== '') {
+            try {
+                self::saveGatewaySetting(self::REFUND_2FA_STORE_SETTING, '');
+            } catch (\Throwable $e) {
+                // Nothing useful to do; a stale prompt is not worth failing on.
+            }
+        }
+
+        if (!is_array($flag)) {
             return null;
         }
 
-        $flag = $_SESSION[self::REFUND_2FA_SESSION_KEY];
-        unset($_SESSION[self::REFUND_2FA_SESSION_KEY]);
+        // Ignore anything older than the TTL: it belongs to a refund the
+        // operator has long since navigated away from.
+        $at = isset($flag['at']) ? (int) $flag['at'] : 0;
+        if ($at > 0 && (time() - $at) > self::REFUND_2FA_TTL) {
+            return null;
+        }
 
-        return is_array($flag) ? $flag : null;
+        return $flag;
     }
 
     public static function paymenthood_getPaymentAppBaseUrl(): string
