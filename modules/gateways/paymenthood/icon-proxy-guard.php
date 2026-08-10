@@ -166,10 +166,40 @@ if (!function_exists('paymenthood_iconProxyHostAllowed')) {
             return $type;
         }
 
+        // Azure blob containers frequently label SVGs with a non-image type
+        // (application/svg+xml, text/xml, image/svg). Canonicalise anything
+        // that mentions SVG rather than dropping a real icon — the response is
+        // still emitted as image/svg+xml under nosniff and the sandbox CSP.
+        if (strpos($type, 'svg') !== false) {
+            return 'image/svg+xml';
+        }
+
+        // Non-standard spellings that storage tooling emits.
+        if ($type === 'image/jpg' || $type === 'image/pjpeg') {
+            return 'image/jpeg';
+        }
+
+        // Any other image/* subtype passes through. With nosniff the browser
+        // will not reinterpret it, and the types that actually matter for XSS
+        // (text/html, application/javascript) cannot reach here.
+        if (strpos($type, 'image/') === 0 && $type !== 'image/' && strpos($type, 'image/*') !== 0) {
+            return $type;
+        }
+
         // Upstream said nothing useful — fall back to the file extension, but
         // only onto the same allowlist. Never emit "image/*": it is not a real
         // media type, and with nosniff the browser just drops the response.
-        if ($type === '' || $type === 'application/octet-stream' || $type === 'binary/octet-stream') {
+        // XML types are included because an SVG served as text/xml carries no
+        // "svg" marker in the type at all; only the extension identifies it.
+        $uninformative = [
+            '',
+            'application/octet-stream',
+            'binary/octet-stream',
+            'text/xml',
+            'application/xml',
+        ];
+
+        if (in_array($type, $uninformative, true)) {
             $byExtension = array(
                 'png'  => 'image/png',
                 'jpg'  => 'image/jpeg',

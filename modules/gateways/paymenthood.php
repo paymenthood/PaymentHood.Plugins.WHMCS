@@ -573,6 +573,62 @@ function paymenthood_refundApiPost($url, $token)
     ];
 }
 
+/**
+ * Pull the typed error envelope out of a PaymentHood API response.
+ *
+ * Failures come back as {"TypeName":..., "TypeFullName":..., "Message":...,
+ * "Data":{}} rather than a plain status, so a bare HTTP code says nothing about
+ * what went wrong.
+ */
+function paymenthood_refundApiError(array $response)
+{
+    $pick = function (array $keys) use ($response) {
+        foreach ($keys as $key) {
+            if (isset($response[$key]) && $response[$key] !== '' && $response[$key] !== []) {
+                return $response[$key];
+            }
+        }
+        return null;
+    };
+
+    return array_filter([
+        'typeName'     => $pick(['TypeName', 'typeName']),
+        'typeFullName' => $pick(['TypeFullName', 'typeFullName']),
+        'message'      => $pick(['Message', 'message', 'error', 'detail', 'title']),
+        'data'         => $pick(['Data', 'data']),
+        'errors'       => $pick(['Errors', 'errors']),
+    ], function ($value) {
+        return $value !== null;
+    });
+}
+
+/**
+ * Human-readable one-liner describing an API failure, for the thrown exception
+ * and therefore for the message WHMCS shows the admin.
+ */
+function paymenthood_refundErrorSummary($httpCode, array $response, $rawBody)
+{
+    $error = paymenthood_refundApiError($response);
+
+    $parts = [];
+    if (!empty($error['typeName'])) {
+        $parts[] = (string) $error['typeName'];
+    }
+    if (!empty($error['message']) && (empty($error['typeName']) || strpos((string) $error['message'], (string) $error['typeName']) === false)) {
+        $parts[] = (string) $error['message'];
+    }
+    if (!empty($error['errors'])) {
+        $parts[] = 'errors=' . json_encode($error['errors']);
+    }
+
+    if ($parts === []) {
+        $raw = trim((string) $rawBody);
+        $parts[] = $raw === '' ? 'empty response body' : substr($raw, 0, 300);
+    }
+
+    return 'HTTP ' . (int) $httpCode . ' - ' . implode(': ', $parts);
+}
+
 function paymenthood_refund($params)
 {
     try {
@@ -705,7 +761,27 @@ function paymenthood_refund($params)
             'httpCode' => $httpCode,
             'paymentState' => $response['paymentState'] ?? null,
             'refundId' => $response['refundId'] ?? null,
+            // The API reports failures as a typed envelope in the body. Without
+            // these two the log only ever showed a bare status code.
+            'apiError' => paymenthood_refundApiError($response),
+            'rawResponse' => substr($call['body'], 0, 2000),
         ]);
+
+        // Separate entry for non-2xx so failures are findable without reading
+        // every successful refund call.
+        if ($httpCode < 200 || $httpCode >= 300) {
+            PaymentHoodHandler::safeLogModuleCall('gateway_refund_api_error', [
+                'invoiceId' => $invoiceId,
+                'paymentId' => $paymentId,
+                'action' => $action,
+                'otpSupplied' => $otpCode !== '',
+            ], [
+                'httpCode' => $httpCode,
+                'summary' => paymenthood_refundErrorSummary($httpCode, $response, $call['body']),
+                'apiError' => paymenthood_refundApiError($response),
+                'rawResponse' => substr($call['body'], 0, 2000),
+            ]);
+        }
 
         // 4. Two-factor gate. Both endpoints answer with a typed exception
         //    envelope instead of a plain status, so this must be checked
@@ -713,10 +789,11 @@ function paymenthood_refund($params)
         $twoFactor = PaymentHoodHandler::detectTwoFactorError($call['body']);
 
         if ($twoFactor === PaymentHoodHandler::REFUND_2FA_NEEDS_ACTIVATION) {
-            $message = 'PaymentHood refused the refund: two-factor authentication is not enabled on your '
-                . 'PaymentHood operator account. Enable Google Authenticator at '
-                . PaymentHoodHandler::paymenthood_ConsoleUrl()
-                . ', then retry this refund. No money has been moved.';
+            $message = 'Two-factor authentication is not enabled on your PaymentHood account. '
+                . 'You must activate 2FA in the PaymentHood console before you can issue refunds. '
+                . 'Contact your administrator, or open the PaymentHood console at '
+                . PaymentHoodHandler::paymenthood_ConsoleUrl() . ' to enable it, then retry this refund. '
+                . 'No money has been moved.';
 
             PaymentHoodHandler::flagRefund2fa(
                 PaymentHoodHandler::REFUND_2FA_NEEDS_ACTIVATION,
@@ -783,7 +860,9 @@ function paymenthood_refund($params)
                 ];
             }
 
-            throw new \Exception('Refund failed. Status: ' . ($refundStatus !== '' ? $refundStatus : 'HTTP ' . $httpCode));
+            throw new \Exception('Refund failed. ' . ($refundStatus !== ''
+                ? 'Payment state: ' . $refundStatus
+                : paymenthood_refundErrorSummary($httpCode, $response, $call['body'])));
         }
 
         if ($httpCode >= 200 && $httpCode < 300) {
@@ -808,7 +887,8 @@ function paymenthood_refund($params)
             ];
         }
 
-        throw new \Exception('Mark as refund failed. HTTP Code: ' . $httpCode);
+        throw new \Exception('Mark as refund failed. '
+            . paymenthood_refundErrorSummary($httpCode, $response, $call['body']));
 
     } catch (\Throwable $e) {
         PaymentHoodHandler::safeLogModuleCall(

@@ -340,8 +340,21 @@ try {
             $firstItem = !empty($items) ? $items[0] : [];
             
             // API returns iconUri1 and iconUri2 directly on the item
+            // (PaymentCheckoutMethodItem.iconUri1 / .iconUri2).
             $iconUri1 = $firstItem['iconUri1'] ?? null;
             $iconUri2 = $firstItem['iconUri2'] ?? null;
+
+            // With no icon URI the card row renders without an <img> at all,
+            // which is indistinguishable from a broken proxy at the browser.
+            // Record which it is.
+            if (empty($iconUri1) && empty($iconUri2)) {
+                PaymentHoodHandler::safeLogModuleCall('card_icon_missing_from_api', [
+                    'checkoutMethod' => 'CreditCard',
+                ], [
+                    'itemCount' => count($items),
+                    'itemKeys' => $firstItem ? array_keys($firstItem) : [],
+                ]);
+            }
             
             $isSupportSubscription = $firstItem['isSupportSubscription'] ?? false;
             $isSupportSinglePayment = $firstItem['isSupportSinglePayment'] ?? true;
