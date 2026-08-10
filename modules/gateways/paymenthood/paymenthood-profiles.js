@@ -227,6 +227,20 @@
             img.addEventListener('error', function(e) {
                 var direct = img.getAttribute('data-direct-src') || '';
 
+                // The proxy failed. Retry once against the icon's own URL so a
+                // proxy problem degrades to a slower icon instead of no icon.
+                // The flag stops a loop when the direct URL fails too.
+                if (direct && !img.__phFellBack && img.src !== direct) {
+                    img.__phFellBack = true;
+                    img.src = direct;
+                }
+
+                // Only report the first failure per image.
+                if (img.__phLogged) {
+                    return;
+                }
+                img.__phLogged = true;
+
                 // Best-effort server log
                 fetch(ajaxUrl, {
                     method: 'POST',
