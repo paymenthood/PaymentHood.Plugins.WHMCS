@@ -334,6 +334,18 @@ Contributions are welcome! Please:
 
 ---
 
+## About PaymentHood
+
+[PaymentHood](https://www.paymenthood.com) is a payment orchestration platform that connects your store to 30+ payment providers through a single integration — with automatic routing, failover, webhook verification and server-side confirmation handled for you. Add or switch providers from a dashboard without touching code, and charge one-time or recurring invoices on WHMCS.
+
+- 🔌 **One integration, 30+ providers** — PayPal, Stripe, Adyen, Paystack, Razorpay, Binance Pay and more
+- 🆓 **Free** — no per-transaction fee from PaymentHood; you pay only your provider's processing fees
+- 🔁 **Automatic routing & failover** between providers
+- 🧾 **Recurring / subscription billing** with automatic renewals
+- 🛡️ **Signed webhooks + server-side verification** built in
+
+**Links:** [Website](https://www.paymenthood.com) · [WHMCS integration](https://www.paymenthood.com/integrations/whmcs/) · [Installation guide](https://www.paymenthood.com/integrations/whmcs/installation/) · [Docs](https://docs.paymenthood.com) · [Create a free account](https://console.paymenthood.com/auth/signup)
+
 ## 📄 License
 
 This plugin is proprietary software provided by PaymentHood. All rights reserved.
