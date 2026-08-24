@@ -2,6 +2,7 @@
   "schema": "1.0",
   "type": "whmcs-gateways",
   "name": "paymenthood",
+  "version": "1.2.3",
   "license": "proprietary",
   "category": "payment-gateways",
   "description": {
@@ -16,7 +17,7 @@
       "OAuth 2.0 activation with separate sandbox and live apps",
       "Refunds from the WHMCS admin area, plus a PaymentHood transactions report",
       "No percentage or per-transaction fees from PaymentHood",
-      "Compatible with WHMCS 7.0 and later, including 8.x"
+      "Compatible with WHMCS 8.0 and later"
     ]
   },
   "logo": {
@@ -24,8 +25,8 @@
   },
   "authors": [
     {
-      "name": "PaymentHood",
-      "homepage": "https://paymenthood.com/"
+      "name": "OmegaHood LLC",
+      "homepage": "https://www.paymenthood.com/about/"
     }
   ]
 }

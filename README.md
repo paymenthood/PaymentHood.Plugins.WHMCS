@@ -147,7 +147,7 @@ Smarty template for subscription management:
 ## 🚀 Installation
 
 ### Prerequisites
-- WHMCS 7.0 or higher
+- WHMCS 8.0 or higher
 - PHP 7.4 or higher
 - cURL extension enabled
 - MySQL/MariaDB database
@@ -354,7 +354,10 @@ This plugin is proprietary software provided by PaymentHood. All rights reserved
 
 ## 🔄 Version History
 
-### Version 1.0.0 (Current)
+### Version 1.2.3 (Current)
+- See the GitHub releases page for the full changelog: https://github.com/paymenthood/PaymentHood.Plugins.WHMCS/releases
+
+### Version 1.0.0
 - Initial release
 - OAuth2 activation flow
 - Hosted payment pages
