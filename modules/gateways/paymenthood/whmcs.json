@@ -2,7 +2,7 @@
   "schema": "1.0",
   "type": "whmcs-gateways",
   "name": "paymenthood",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "license": "proprietary",
   "category": "payment-gateways",
   "description": {

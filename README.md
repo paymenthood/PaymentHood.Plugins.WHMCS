@@ -354,7 +354,11 @@ This plugin is proprietary software provided by PaymentHood. All rights reserved
 
 ## 🔄 Version History
 
-### Version 1.2.3 (Current)
+### Version 1.2.4 (Current)
+- Fix: the gateway module no longer changes PHP's global error settings (`display_errors`, `display_startup_errors`, `error_reporting`) when WHMCS loads it. This stops cart and checkout pages from answering HTTP 500 on unrelated PHP warnings and avoids exposing server paths to visitors.
+- See the GitHub releases page for the full changelog: https://github.com/paymenthood/PaymentHood.Plugins.WHMCS/releases
+
+### Version 1.2.3
 - See the GitHub releases page for the full changelog: https://github.com/paymenthood/PaymentHood.Plugins.WHMCS/releases
 
 ### Version 1.0.0
